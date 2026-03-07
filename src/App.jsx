@@ -1035,7 +1035,7 @@ function Inventory({data, session, save, addLog, showToast, role}){
         </div>}
       </div>
 
-      {isOwner&&(
+      {isOwner&&AI_ENABLED&&(
         <div style={{background:"linear-gradient(135deg,#1a0533,#0d1b3e)",border:"1px solid #3d1e5f",borderRadius:12,padding:"12px 16px",marginBottom:14,display:"flex",alignItems:"center",gap:12}}>
           <div style={{fontSize:24}}>📷</div>
           <div style={{flex:1}}>
