@@ -6,6 +6,11 @@ import { useState, useEffect, useCallback, useRef } from "react";
 const SUPA_URL = "https://awkavmspstfddkxemdus.supabase.co";
 const SUPA_KEY = "sb_publishable_bobwHAeey_0rOvasv46Dbg_q8_CPaF9";
 
+// ═══════════════════════════════════════════════════════════════════
+//  AI FEATURES FLAG — set to true when client upgrades to Premium
+// ═══════════════════════════════════════════════════════════════════
+const AI_ENABLED = false; // Set to true to unlock AI features
+
 const supa = async (path, method="GET", body=null) => {
   const res = await fetch(`${SUPA_URL}/rest/v1/${path}`, {
     method,
@@ -1025,7 +1030,7 @@ function Inventory({data, session, save, addLog, showToast, role}){
           <button key={f} className={`btn ${filter===f?"bp":"bg"}`} style={{padding:"6px 12px",fontSize:12}} onClick={()=>setFilter(f)}>{f}</button>
         ))}
         {isOwner&&<div style={{display:"flex",gap:8,marginLeft:"auto"}}>
-          <button className="btn bpurp" onClick={()=>setScan(true)}><Ic d={I.scan} size={13}/> 📷 Scan to Add</button>
+          {AI_ENABLED && <button className="btn bpurp" onClick={()=>setScan(true)}><Ic d={I.scan} size={13}/> 📷 Scan to Add</button>}
           <button className="btn bs" onClick={openAdd}><Ic d={I.plus} size={13}/> Manual Add</button>
         </div>}
       </div>
@@ -1436,6 +1441,30 @@ Be concise, practical, use ₦ for prices. Address owner as ${session.name}.`;
     }catch{ setMsgs([...nm,{role:"assistant",content:"Connection error. Please check your internet and try again."}]); }
     setBusy(false);
   };
+
+  if(!AI_ENABLED) return (
+    <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",minHeight:400,gap:20}}>
+      <div style={{fontSize:56}}>🤖</div>
+      <div style={{fontFamily:"Syne,sans-serif",fontSize:22,fontWeight:800,color:"#f1f5f9",textAlign:"center"}}>AI Features — Premium</div>
+      <div style={{fontSize:14,color:"#475569",textAlign:"center",maxWidth:380,lineHeight:1.7}}>
+        The AI Assistant, Daily Insights and Scan-to-Add features are available on the Premium plan.
+        Contact your system provider to upgrade and unlock intelligent pharmacy management.
+      </div>
+      <div style={{background:"linear-gradient(135deg,#0d1b3e,#1a0533)",border:"1px solid #2d1b69",borderRadius:16,padding:20,maxWidth:380,width:"100%"}}>
+        <div style={{fontSize:13,fontWeight:700,color:"#a78bfa",marginBottom:12}}>✨ Premium includes:</div>
+        {[["🤖","AI Business Assistant","Ask questions about your pharmacy in plain English"],
+          ["📊","Daily Intelligence Report","Automatic insights on sales, stock and growth"],
+          ["📷","Scan to Add","Point camera at drug label — AI fills details instantly"],
+        ].map(([ic,t,d])=>(
+          <div key={t} style={{display:"flex",gap:12,marginBottom:12}}>
+            <div style={{fontSize:20,flexShrink:0}}>{ic}</div>
+            <div><div style={{fontSize:13,fontWeight:600,color:"#e2e8f0"}}>{t}</div><div style={{fontSize:11,color:"#475569"}}>{d}</div></div>
+          </div>
+        ))}
+      </div>
+      <div style={{fontSize:12,color:"#334155",textAlign:"center"}}>Contact your system provider to activate Premium</div>
+    </div>
+  );
 
   return(
     <div style={{display:"flex",flexDirection:"column",gap:18}}>
