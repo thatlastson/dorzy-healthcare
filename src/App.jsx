@@ -12,17 +12,21 @@ const SUPA_KEY = "sb_publishable_bobwHAeey_0rOvasv46Dbg_q8_CPaF9";
 const AI_ENABLED = false; // Set to true to unlock AI features
 
 const supa = async (path, method="GET", body=null) => {
+  const isUpsert = path.includes("on_conflict");
   const res = await fetch(`${SUPA_URL}/rest/v1/${path}`, {
     method,
     headers: {
       "Content-Type": "application/json",
       "apikey": SUPA_KEY,
       "Authorization": `Bearer ${SUPA_KEY}`,
-      "Prefer": method==="POST" ? "return=representation" : "return=minimal",
+      "Prefer": isUpsert ? "resolution=merge-duplicates,return=minimal" : (method==="POST" ? "return=representation" : "return=minimal"),
     },
     body: body ? JSON.stringify(body) : null,
   });
-  if(method==="GET"||method==="POST") {
+  if(method==="GET") {
+    try { return await res.json(); } catch { return []; }
+  }
+  if(method==="POST" && !isUpsert) {
     try { return await res.json(); } catch { return []; }
   }
   return true;
@@ -56,16 +60,19 @@ const DB = {
         address:      rawSettings.address||"",
         email:        rawSettings.email||"",
       } : SEED.settings;
+      // Never fall back to SEED inside load — return exactly what DB has
       return {
-        users:     Array.isArray(users)     ? users.map(mapUser)  : SEED.users,
-        inventory: Array.isArray(inventory) ? inventory.map(mapInv) : SEED.inventory,
-        sales:     Array.isArray(sales)     ? sales.map(mapSale)  : [],
+        users:     Array.isArray(users)     ? users.map(mapUser)     : [],
+        inventory: Array.isArray(inventory) ? inventory.map(mapInv)  : [],
+        sales:     Array.isArray(sales)     ? sales.map(mapSale)     : [],
         customers: Array.isArray(customers) ? customers.map(mapCust) : [],
-        auditLog:  Array.isArray(auditLog)  ? auditLog.map(mapLog) : [],
+        auditLog:  Array.isArray(auditLog)  ? auditLog.map(mapLog)   : [],
         settings,
       };
     } catch(e) {
       console.error("DB load error:", e);
+      // Return null to trigger retry — NEVER fall back to SEED data
+      // This prevents real data being replaced by demo data on network errors
       return null;
     }
   },
@@ -134,15 +141,21 @@ const DB = {
   },
 
   async initSeedData(seed) {
-    // Only seed if users table is empty
+    // SAFE seed — only runs if users table is genuinely empty
+    // Uses a strict check to prevent overwriting real data
     try {
       const existing = await supa("users?select=id&limit=1");
+      // Only seed if we got a valid empty array back — never seed on error
       if(Array.isArray(existing) && existing.length === 0) {
+        console.log("Fresh database detected — seeding initial data");
         await DB.saveUsers(seed.users);
         await DB.saveInventory(seed.inventory);
         await DB.saveSettings(seed.settings);
       }
-    } catch(e) { console.error("Seed error:", e); }
+      // If existing has data OR returned an error object, do nothing
+    } catch(e) {
+      console.error("Seed check error — skipping seed to protect data:", e);
+    }
   },
 };
 
@@ -267,10 +280,47 @@ export default function App() {
 
   useEffect(()=>{
     (async()=>{
-      // Seed initial data if DB is empty, then load
-      await DB.initSeedData(SEED);
-      const stored = await DB.load();
-      setData(stored || SEED);
+      try {
+        // STEP 1: Check if DB is completely new (no users at all) — seed once only
+        await DB.initSeedData(SEED);
+
+        // STEP 2: Load real data from Supabase — retry up to 3 times
+        let stored = null;
+        for(let i = 0; i < 3; i++) {
+          stored = await DB.load();
+          if(stored) break;
+          await new Promise(r => setTimeout(r, 1500));
+        }
+
+        if(stored) {
+          // Got real data from DB — always use it, never override with SEED
+          setData(stored);
+        } else {
+          // Could not reach Supabase after 3 tries
+          // Check if DB is genuinely empty before using SEED
+          const check = await supa("users?select=id&limit=1");
+          if(Array.isArray(check) && check.length === 0) {
+            // DB is truly empty — safe to show seed as starting point
+            setData(SEED);
+          } else {
+            // DB has data but network is failing — show loading error, not SEED
+            // This prevents wiping real data with demo data on network issues
+            setData({
+              users: [], inventory: [], sales: [], customers: [],
+              auditLog: [], settings: SEED.settings
+            });
+          }
+        }
+      } catch(e) {
+        console.error("App load error:", e);
+        // On total failure, show empty state — never SEED over real data
+        setData({
+          users: [], inventory: [], sales: [], customers: [],
+          auditLog: [], settings: SEED.settings
+        });
+      }
+
+      // Restore login session from browser storage
       try {
         const s = sessionStorage.getItem("dorzy_session");
         if(s) setSession(JSON.parse(s));
