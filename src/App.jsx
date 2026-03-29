@@ -38,13 +38,14 @@ const supa = async (path, method="GET", body=null) => {
 const DB = {
   async load() {
     try {
-      const [users, inventory, sales, customers, auditLog, settingsArr] = await Promise.all([
+      const [users, inventory, sales, customers, auditLog, settingsArr, invoices] = await Promise.all([
         supa("users?select=*&order=created_at.asc"),
         supa("inventory?select=*&order=name.asc"),
         supa("sales?select=*&order=timestamp.desc"),
         supa("customers?select=*&order=name.asc"),
         supa("audit_log?select=*&order=timestamp.desc&limit=300"),
         supa("settings?select=*"),
+        supa("invoices?select=*&order=date.desc"),
       ]);
       // Map snake_case DB columns back to camelCase for the app
       const mapInv = i => ({...i, costPrice:i.cost_price, sellingPrice:i.selling_price, reorderLevel:i.reorder_level});
@@ -61,12 +62,14 @@ const DB = {
         email:        rawSettings.email||"",
       } : SEED.settings;
       // Never fall back to SEED inside load — return exactly what DB has
+      const mapInvoice = i => ({...i, recordedBy: i.recorded_by, items: i.items||[]});
       return {
-        users:     Array.isArray(users)     ? users.map(mapUser)     : [],
-        inventory: Array.isArray(inventory) ? inventory.map(mapInv)  : [],
-        sales:     Array.isArray(sales)     ? sales.map(mapSale)     : [],
-        customers: Array.isArray(customers) ? customers.map(mapCust) : [],
-        auditLog:  Array.isArray(auditLog)  ? auditLog.map(mapLog)   : [],
+        users:     Array.isArray(users)     ? users.map(mapUser)       : [],
+        inventory: Array.isArray(inventory) ? inventory.map(mapInv)    : [],
+        sales:     Array.isArray(sales)     ? sales.map(mapSale)       : [],
+        customers: Array.isArray(customers) ? customers.map(mapCust)   : [],
+        auditLog:  Array.isArray(auditLog)  ? auditLog.map(mapLog)     : [],
+        invoices:  Array.isArray(invoices)  ? invoices.map(mapInvoice) : [],
         settings,
       };
     } catch(e) {
@@ -130,6 +133,28 @@ const DB = {
       phone: s.phone||"", address: s.address||"", email: s.email||"",
     };
     await supa("settings?on_conflict=id", "POST", [row]);
+  },
+
+  async saveInvoice(invoice) {
+    const row = {
+      id: invoice.id, supplier: invoice.supplier, address: invoice.address||"",
+      phone: invoice.phone||"", date: invoice.date, items: invoice.items,
+      total: invoice.total, notes: invoice.notes||"", recorded_by: invoice.recordedBy||"",
+    };
+    await supa("invoices?on_conflict=id", "POST", [row]);
+  },
+
+  async deleteInvoice(id) {
+    await supa(`invoices?id=eq.${id}`, "DELETE");
+  },
+
+  async loadInvoices() {
+    try {
+      const rows = await supa("invoices?select=*&order=date.desc");
+      return Array.isArray(rows) ? rows.map(r=>({
+        ...r, recordedBy: r.recorded_by, items: r.items||[]
+      })) : [];
+    } catch { return []; }
   },
 
   async saveAuditLog(entry) {
@@ -340,6 +365,8 @@ export default function App() {
       if(ops.users)        await DB.saveUsers(d.users);
       if(ops.settings)     await DB.saveSettings(d.settings);
       if(ops.auditEntry)   await DB.saveAuditLog(ops.auditEntry);
+      if(ops.invoice)      await DB.saveInvoice(ops.invoice);
+      if(ops.delInvoiceId) await DB.deleteInvoice(ops.delInvoiceId);
     } catch(e) { console.error("Save error:", e); }
   },[]);
 
@@ -517,7 +544,8 @@ function MainApp({data, session, save, addLog, showToast, onLogout, updateSessio
     {id:"ai",        label:"AI Assistant", icon:I.brain,  roles:["owner"], badge:"AI"},
     {id:"users",     label:"User Mgmt",    icon:I.users,  roles:["owner"]},
     {id:"audit",     label:"Audit Log",    icon:I.log,    roles:["owner"]},
-    {id:"settings",  label:"Settings",     icon:I.cog,    roles:["owner"]},
+    {id:"invoices",   label:"Purchase Invoice", icon:I.file, roles:["owner"]},
+    {id:"settings",   label:"Settings",     icon:I.cog,    roles:["owner"]},
   ];
   const nav = allNav.filter(n=>n.roles.includes(role));
 
@@ -612,6 +640,7 @@ function MainApp({data, session, save, addLog, showToast, onLogout, updateSessio
           {page==="ai"        &&role==="owner"&&<AIAssistant {...ctx}/>}
           {page==="users"     &&role==="owner"&&<UserMgmt   {...ctx}/>}
           {page==="audit"     &&role==="owner"&&<AuditLog   {...ctx}/>}
+          {page==="invoices"  &&role==="owner"&&<PurchaseInvoice {...ctx}/>}
           {page==="settings"  &&role==="owner"&&<Settings   {...ctx}/>}
         </div>
       </div>
@@ -1162,7 +1191,7 @@ function Inventory({data, session, save, addLog, showToast, role}){
             <div className="fg"><label>Drug Name *</label><input className="inp" value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></div>
             <div className="fr">
               <div className="fg"><label>Category</label><select className="inp" value={form.category} onChange={e=>setForm({...form,category:e.target.value})}><option>OTC</option><option>Prescription</option></select></div>
-              <div className="fg"><label>Unit</label><select className="inp" value={form.unit} onChange={e=>setForm({...form,unit:e.target.value})}><option>Tabs</option><option>Caps</option><option>Bottles</option><option>Vials</option><option>Sachets</option><option>Pieces</option></select></div>
+              <div className="fg"><label>Unit</label><select className="inp" value={form.unit} onChange={e=>setForm({...form,unit:e.target.value})}><option>Tabs</option><option>Caps</option><option>Bottles</option><option>Vials</option><option>Sachets</option><option>Packets</option><option>Pieces</option></select></div>
             </div>
             <div className="fr">
               <div className="fg"><label>Quantity *</label><input className="inp" type="number" value={form.qty} onChange={e=>setForm({...form,qty:+e.target.value})}/></div>
@@ -1197,6 +1226,7 @@ function Sales({data, session, save, addLog, showToast, role}){
   const [search,setSearch]       = useState("");
   const [payModal,setPayModal]   = useState(null); // sale being paid
   const [payAmt,setPayAmt]       = useState("");
+  const [delSale,setDelSale]     = useState(null); // sale pending deletion
   const E = {type:"OTC",customer:"",date:now(),items:[],notes:"",paymentMethod:"Cash",amountPaid:"",isPartPayment:false};
   const [form,setForm]           = useState(E);
   const [cart,setCart]           = useState({drugId:"",qty:1});
@@ -1204,8 +1234,12 @@ function Sales({data, session, save, addLog, showToast, role}){
   const total   = form.items.reduce((a,i)=>a+i.subtotal,0);
   const balance = total - (+form.amountPaid||total);
 
-  // All customers who have ever bought (registered + walk-ins)
-  const allBuyers = [...new Set(data.sales.map(s=>s.customer).filter(Boolean))];
+  // All customers — registered + walk-in buyers, searchable by name or phone
+  const allBuyers = [
+    ...data.customers.map(c=>({name:c.name, phone:c.phone||"", source:"registered"})),
+    ...[...new Set(data.sales.map(s=>s.customer).filter(n=>n&&!data.customers.find(c=>c.name===n)))]
+      .map(name=>({name, phone:"", source:"walkin"}))
+  ];
 
   // Debtors — sales with outstanding balance
   const debtors = data.sales.filter(s=>s.balanceOwed>0);
@@ -1236,8 +1270,8 @@ function Sales({data, session, save, addLog, showToast, role}){
   const doSale = () => {
     if(form.items.length===0) return showToast("Add at least one item","error");
     const amtPaid = form.isPartPayment ? (+form.amountPaid||0) : total;
-    if(form.isPartPayment && amtPaid<=0) return showToast("Enter amount paid for part-payment","error");
-    if(form.isPartPayment && amtPaid>=total) return showToast("Amount paid equals total — use Full Payment instead","error");
+    if(form.isPartPayment && amtPaid<0) return showToast("Amount paid cannot be negative","error");
+    if(form.isPartPayment && amtPaid>=total) return showToast("Amount paid equals or exceeds total — use Full Payment instead","error");
     const balOwed = form.isPartPayment ? total - amtPaid : 0;
     const sale = {
       id:uid(), ...form, total,
@@ -1257,6 +1291,21 @@ function Sales({data, session, save, addLog, showToast, role}){
   };
 
   const openPay = (sale) => { setPayModal(sale); setPayAmt(""); };
+
+  const confirmDelSale = () => {
+    const sale = delSale;
+    const newSales = data.sales.filter(s=>s.id!==sale.id);
+    // Restore inventory quantities when sale is deleted
+    const newInv = data.inventory.map(drug=>{
+      const item = sale.items.find(i=>i.drugId===drug.id);
+      return item?{...drug,qty:drug.qty+item.qty}:drug;
+    });
+    const [d2,entry] = addLog({...data,sales:newSales,inventory:newInv},
+      "SALE_DELETED", `Sale deleted: ${fmt(sale.total)} — ${sale.customer||"Walk-in"} on ${sale.date}`, session);
+    save(d2,{inventory:true,auditEntry:entry});
+    showToast("Sale deleted and stock restored");
+    setDelSale(null);
+  };
 
   const applyPayment = (payAll) => {
     const sale = payModal;
@@ -1316,7 +1365,10 @@ function Sales({data, session, save, addLog, showToast, role}){
                     {role==="owner"&&<td style={{color:"#4ade80",fontWeight:700}}>{fmt(s.total)}</td>}
                     {role==="owner"&&<td style={{color:"#38bdf8",fontSize:12}}>{fmt(s.amountPaid||s.total)}</td>}
                     {role==="owner"&&<td style={{color:s.balanceOwed>0?"#f87171":"#334155",fontWeight:s.balanceOwed>0?700:400,fontSize:12}}>{s.balanceOwed>0?fmt(s.balanceOwed):"—"}</td>}
-                    <td><button className="btn bg" style={{padding:"4px 9px",fontSize:11}} onClick={()=>setReceipt(s)}><Ic d={I.print} size={12}/></button></td>
+                    <td style={{display:"flex",gap:5}}>
+                      <button className="btn bg" style={{padding:"4px 9px",fontSize:11}} onClick={()=>setReceipt(s)}><Ic d={I.print} size={12}/></button>
+                      {role==="owner"&&<button className="btn bd" style={{padding:"4px 9px",fontSize:11}} onClick={()=>setDelSale(s)}><Ic d={I.trash} size={12}/></button>}
+                    </td>
                   </tr>
                 ))
               }
@@ -1363,6 +1415,30 @@ function Sales({data, session, save, addLog, showToast, role}){
                 }
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {/* DELETE SALE CONFIRMATION MODAL */}
+      {delSale&&(
+        <div className="mo" onClick={e=>e.target===e.currentTarget&&setDelSale(null)}>
+          <div style={{background:"#0d1528",border:"1px solid #7f1d1d",borderRadius:20,padding:28,width:440,maxWidth:"95vw",textAlign:"center"}}>
+            <div style={{fontSize:40,marginBottom:12}}>🗑️</div>
+            <div style={{fontFamily:"Syne,sans-serif",fontSize:16,fontWeight:800,color:"#f1f5f9",marginBottom:8}}>Delete Sale Record?</div>
+            <div style={{fontSize:13,color:"#94a3b8",marginBottom:14}}>This will permanently delete this sale and restore the stock quantities.</div>
+            <div style={{background:"#0a1525",borderRadius:10,padding:12,marginBottom:16,textAlign:"left"}}>
+              <div style={{fontSize:12,color:"#475569",marginBottom:4}}>Sale details:</div>
+              <div style={{fontSize:13,fontWeight:700,color:"#f1f5f9"}}>{delSale.customer||"Walk-in"} — {delSale.date}</div>
+              <div style={{fontSize:13,color:"#4ade80",fontWeight:700}}>{fmt(delSale.total)}</div>
+              <div style={{fontSize:11,color:"#94a3b8",marginTop:4}}>{delSale.items.map(i=>i.name).join(", ")}</div>
+            </div>
+            <div style={{fontSize:11,color:"#f87171",background:"#1a0505",borderRadius:8,padding:"8px 12px",marginBottom:16}}>
+              ⚠️ Stock for all items in this sale will be automatically restored.
+            </div>
+            <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+              <button className="btn bg" style={{padding:"10px 24px"}} onClick={()=>setDelSale(null)}>Cancel</button>
+              <button className="btn bd" style={{padding:"10px 24px"}} onClick={confirmDelSale}>Yes, Delete Sale</button>
+            </div>
           </div>
         </div>
       )}
@@ -1442,17 +1518,23 @@ function Sales({data, session, save, addLog, showToast, role}){
             {/* Customer with autocomplete from past buyers */}
             <div className="fg">
               <label>Customer Name</label>
-              <input className="inp" list="buyers-list" placeholder="Walk-in or type name..." value={form.customer} onChange={e=>setForm({...form,customer:e.target.value})}/>
+              <input className="inp" list="buyers-list" placeholder="Walk-in or type name / phone..." value={form.customer} onChange={e=>setForm({...form,customer:e.target.value})}/>
               <datalist id="buyers-list">
-                {allBuyers.map(b=><option key={b} value={b}/>)}
+                {allBuyers.map(b=><option key={b.name+b.phone} value={b.name}>{b.phone?`${b.name} — ${b.phone}`:b.name}</option>)}
               </datalist>
-              {form.customer&&data.sales.filter(s=>s.customer===form.customer).length>0&&(
-                <div style={{fontSize:11,color:"#38bdf8",marginTop:4}}>
-                  📋 {data.sales.filter(s=>s.customer===form.customer).length} previous visit(s) —
-                  Last: {data.sales.filter(s=>s.customer===form.customer).slice(-1)[0]?.date} —
-                  {data.sales.filter(s=>s.customer===form.customer).slice(-1)[0]?.items.map(i=>i.name).join(", ").slice(0,50)}
-                </div>
-              )}
+              {form.customer&&(()=>{
+                const regCust = data.customers.find(c=>c.name===form.customer||c.phone===form.customer);
+                const custName = regCust?regCust.name:form.customer;
+                const history = data.sales.filter(s=>s.customer===custName);
+                const lastSale = history.slice(-1)[0];
+                return history.length>0?(
+                  <div style={{fontSize:11,color:"#38bdf8",marginTop:4,background:"#07101f",borderRadius:6,padding:"5px 8px"}}>
+                    📋 <strong>{custName}</strong> — {history.length} visit(s) —
+                    Last: {lastSale?.date} — {lastSale?.items.map(i=>i.name).join(", ").slice(0,50)}
+                    {regCust?.allergies&&<span style={{color:"#fb923c",marginLeft:6}}>⚠️ Allergy: {regCust.allergies}</span>}
+                  </div>
+                ):null;
+              })()}
             </div>
 
             {/* Payment Method */}
@@ -1476,7 +1558,11 @@ function Sales({data, session, save, addLog, showToast, role}){
                 <div style={{flex:2}}>
                   <select className="inp" value={cart.drugId} onChange={e=>setCart({...cart,drugId:e.target.value})}>
                     <option value="">Select drug...</option>
-                    {data.inventory.filter(d=>d.qty>0&&days(d.expiry)>0).map(d=><option key={d.id} value={d.id}>{d.name} — Stock: {d.qty} {d.unit}</option>)}
+                    {data.inventory.filter(d=>days(d.expiry)>0||d.qty>0).sort((a,b)=>b.qty-a.qty).map(d=>(
+                      <option key={d.id} value={d.id} disabled={d.qty<=0}>
+                        {d.qty<=0?`${d.name} — OUT OF STOCK`:d.qty<=d.reorderLevel?`${d.name} — Low: ${d.qty} ${d.unit}`:`${d.name} — Stock: ${d.qty} ${d.unit}`}
+                      </option>
+                    ))}
                   </select>
                 </div>
                 <input className="inp" type="number" min={1} value={cart.qty} onChange={e=>setCart({...cart,qty:+e.target.value})} style={{width:70}}/>
@@ -1721,6 +1807,230 @@ function Records({data, session, save, addLog, showToast}){
             <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
               <button className="btn bg" onClick={()=>setModal(false)}>Cancel</button>
               <button className="btn bs" onClick={handleSave}><Ic d={I.check} size={13}/> Save Record</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  PURCHASE INVOICE
+// ═══════════════════════════════════════════════════════════════════
+function PurchaseInvoice({data, session, save, addLog, showToast}){
+  const invoices = data.invoices||[];
+  const [modal,setModal]       = useState(false);
+  const [viewModal,setView]    = useState(null);
+  const [confirmDel,setConfirm]= useState(null);
+  const [search,setSearch]     = useState("");
+  const E = {supplier:"",address:"",phone:"",date:now(),items:[],notes:""};
+  const [form,setForm]         = useState(E);
+  const [itemRow,setItemRow]   = useState({name:"",qty:"",unit:"",unitCost:"",totalCost:""});
+
+  const filtered = invoices.filter(inv=>
+    inv.supplier.toLowerCase().includes(search.toLowerCase())||
+    inv.date.includes(search)
+  );
+
+  const totalPurchases = invoices.reduce((a,i)=>a+i.total,0);
+  const uniqueSuppliers = [...new Set(invoices.map(i=>i.supplier))].length;
+
+  const addItem = () => {
+    if(!itemRow.name||!itemRow.qty) return showToast("Item name and quantity required","error");
+    const total = +itemRow.qty * (+itemRow.unitCost||0);
+    setForm({...form, items:[...form.items,{...itemRow,qty:+itemRow.qty,unitCost:+itemRow.unitCost||0,totalCost:total}]});
+    setItemRow({name:"",qty:"",unit:"",unitCost:"",totalCost:""});
+  };
+
+  const handleSave = () => {
+    if(!form.supplier) return showToast("Supplier name is required","error");
+    if(form.items.length===0) return showToast("Add at least one item","error");
+    const total = form.items.reduce((a,i)=>a+i.totalCost,0);
+    const invoice = {id:uid(),...form,total,recordedBy:session.name,timestamp:Date.now()};
+    const newInvoices = [...invoices, invoice];
+    const [d2,entry] = addLog({...data,invoices:newInvoices},"INVOICE_ADDED",`Purchase invoice from ${form.supplier} — ${fmt(total)}`,session);
+    save(d2,{invoice,auditEntry:entry});
+    showToast("Invoice saved successfully");
+    setModal(false); setForm(E);
+  };
+
+  const handleDel = () => {
+    const inv = confirmDel;
+    const newInvoices = invoices.filter(i=>i.id!==inv.id);
+    const [d2,entry] = addLog({...data,invoices:newInvoices},"INVOICE_DELETED",`Invoice deleted: ${inv.supplier} — ${fmt(inv.total)}`,session);
+    save(d2,{delInvoiceId:inv.id,auditEntry:entry});
+    showToast("Invoice deleted"); setConfirm(null);
+  };
+
+  return(
+    <div>
+      {/* Delete confirm */}
+      {confirmDel&&(
+        <div className="mo" onClick={e=>e.target===e.currentTarget&&setConfirm(null)}>
+          <div style={{background:"#0d1528",border:"1px solid #7f1d1d",borderRadius:20,padding:28,width:420,maxWidth:"95vw",textAlign:"center"}}>
+            <div style={{fontSize:36,marginBottom:12}}>🗑️</div>
+            <div style={{fontFamily:"Syne,sans-serif",fontSize:15,fontWeight:800,color:"#f1f5f9",marginBottom:8}}>Delete Invoice?</div>
+            <div style={{fontSize:13,color:"#94a3b8",marginBottom:14}}>{confirmDel.supplier} — {confirmDel.date} — {fmt(confirmDel.total)}</div>
+            <div style={{display:"flex",gap:10,justifyContent:"center"}}>
+              <button className="btn bg" style={{padding:"9px 22px"}} onClick={()=>setConfirm(null)}>Cancel</button>
+              <button className="btn bd" style={{padding:"9px 22px"}} onClick={handleDel}>Delete</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* View Invoice Modal */}
+      {viewModal&&(
+        <div className="mo" onClick={e=>e.target===e.currentTarget&&setView(null)}>
+          <div className="md" style={{width:560,maxHeight:"85vh",overflowY:"auto"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+              <div>
+                <div style={{fontFamily:"Syne,sans-serif",fontSize:16,fontWeight:800,color:"#f1f5f9"}}>📦 Purchase Invoice</div>
+                <div style={{fontSize:11,color:"#475569"}}>#{viewModal.id.slice(-6).toUpperCase()}</div>
+              </div>
+              <button className="btn bg" style={{padding:"4px 7px"}} onClick={()=>setView(null)}><Ic d={I.x} size={13}/></button>
+            </div>
+            <div style={{background:"#0a1525",borderRadius:10,padding:14,marginBottom:14}}>
+              {[["Supplier",viewModal.supplier],["Address",viewModal.address||"—"],["Phone",viewModal.phone||"—"],["Date",viewModal.date],["Recorded by",viewModal.recordedBy||"—"]].map(([l,v])=>(
+                <div key={l} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:"1px solid #1e2d45"}}>
+                  <span style={{fontSize:11,color:"#475569"}}>{l}</span>
+                  <span style={{fontSize:13,fontWeight:600,color:"#e2e8f0"}}>{v}</span>
+                </div>
+              ))}
+            </div>
+            <div style={{fontWeight:700,color:"#f1f5f9",marginBottom:8,fontSize:13}}>Items Purchased</div>
+            <table className="tbl" style={{marginBottom:14}}>
+              <thead><tr><th>Item</th><th>Qty</th><th>Unit</th><th>Unit Cost</th><th>Total</th></tr></thead>
+              <tbody>
+                {viewModal.items.map((item,i)=>(
+                  <tr key={i}>
+                    <td style={{color:"#e2e8f0",fontWeight:600}}>{item.name}</td>
+                    <td style={{color:"#38bdf8"}}>{item.qty}</td>
+                    <td style={{color:"#64748b"}}>{item.unit||"—"}</td>
+                    <td style={{color:"#94a3b8"}}>{item.unitCost>0?fmt(item.unitCost):"—"}</td>
+                    <td style={{color:"#4ade80",fontWeight:700}}>{item.totalCost>0?fmt(item.totalCost):"—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <div style={{textAlign:"right",fontSize:16,fontWeight:800,color:"#4ade80",marginBottom:10}}>
+              Total: {fmt(viewModal.total)}
+            </div>
+            {viewModal.notes&&<div style={{fontSize:12,color:"#475569",background:"#0a1525",borderRadius:8,padding:"8px 12px"}}>Note: {viewModal.notes}</div>}
+          </div>
+        </div>
+      )}
+
+      {/* Stats */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:14,marginBottom:16}}>
+        {[
+          {l:"Total Invoices",    v:invoices.length,       c:"#38bdf8", i:"📦"},
+          {l:"Total Purchases",   v:fmt(totalPurchases),   c:"#4ade80", i:"💰"},
+          {l:"Unique Suppliers",  v:uniqueSuppliers,       c:"#a78bfa", i:"🏭"},
+        ].map((s,i)=>(
+          <div key={i} style={{background:"linear-gradient(135deg,#0d1528,#0d1f3c)",border:"1px solid #1e3a5f",borderRadius:14,padding:16}}>
+            <div style={{fontSize:22,marginBottom:6}}>{s.i}</div>
+            <div style={{fontSize:20,fontWeight:800,color:s.c}}>{s.v}</div>
+            <div style={{fontSize:12,color:"#64748b",marginTop:2}}>{s.l}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Search and Add */}
+      <div style={{display:"flex",gap:10,marginBottom:14,alignItems:"center"}}>
+        <input className="inp" style={{maxWidth:280}} placeholder="Search by supplier or date..." value={search} onChange={e=>setSearch(e.target.value)}/>
+        <button className="btn bs" style={{marginLeft:"auto"}} onClick={()=>{setForm(E);setModal(true)}}><Ic d={I.plus} size={13}/> New Invoice</button>
+      </div>
+
+      {/* Invoice List */}
+      <div className="card" style={{padding:0}}>
+        <table className="tbl">
+          <thead><tr><th>Date</th><th>Supplier</th><th>Address</th><th>Items</th><th>Total</th><th>Recorded By</th><th>Actions</th></tr></thead>
+          <tbody>
+            {filtered.length===0
+              ? <tr><td colSpan={7} style={{textAlign:"center",padding:32,color:"#334155"}}>No invoices yet — add your first purchase</td></tr>
+              : filtered.map(inv=>(
+                <tr key={inv.id}>
+                  <td style={{color:"#64748b",fontSize:12}}>{inv.date}</td>
+                  <td style={{fontWeight:700,color:"#f1f5f9"}}>{inv.supplier}</td>
+                  <td style={{color:"#475569",fontSize:12}}>{inv.address||"—"}</td>
+                  <td style={{color:"#94a3b8",fontSize:12}}>{inv.items.length} item(s)</td>
+                  <td style={{color:"#4ade80",fontWeight:700}}>{fmt(inv.total)}</td>
+                  <td style={{color:"#a78bfa",fontSize:12}}>{inv.recordedBy||"—"}</td>
+                  <td style={{display:"flex",gap:5}}>
+                    <button className="btn bp" style={{padding:"4px 9px",fontSize:11}} onClick={()=>setView(inv)}>👁 View</button>
+                    <button className="btn bd" style={{padding:"4px 9px",fontSize:11}} onClick={()=>setConfirm(inv)}><Ic d={I.trash} size={12}/></button>
+                  </td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </div>
+
+      {/* Add Invoice Modal */}
+      {modal&&(
+        <div className="mo" onClick={e=>e.target===e.currentTarget&&setModal(false)}>
+          <div className="md" style={{width:580,maxHeight:"90vh",overflowY:"auto"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+              <h3 style={{fontFamily:"Syne,sans-serif",fontSize:16,fontWeight:800,color:"#f1f5f9"}}>New Purchase Invoice</h3>
+              <button className="btn bg" style={{padding:"4px 7px"}} onClick={()=>setModal(false)}><Ic d={I.x} size={13}/></button>
+            </div>
+            <div className="fr">
+              <div className="fg"><label>Supplier / Dealer Name *</label><input className="inp" placeholder="e.g. PharmaCo Ltd" value={form.supplier} onChange={e=>setForm({...form,supplier:e.target.value})}/></div>
+              <div className="fg"><label>Date *</label><input className="inp" type="date" value={form.date} onChange={e=>setForm({...form,date:e.target.value})}/></div>
+            </div>
+            <div className="fr">
+              <div className="fg"><label>Supplier Address</label><input className="inp" placeholder="e.g. 12 Aba Road, PH" value={form.address} onChange={e=>setForm({...form,address:e.target.value})}/></div>
+              <div className="fg"><label>Supplier Phone</label><input className="inp" placeholder="e.g. 08012345678" value={form.phone} onChange={e=>setForm({...form,phone:e.target.value})}/></div>
+            </div>
+
+            {/* Add item row */}
+            <div style={{background:"#0a1525",border:"1px solid #1e3a5f",borderRadius:10,padding:14,marginBottom:12}}>
+              <div style={{fontSize:11,fontWeight:700,color:"#475569",marginBottom:10,textTransform:"uppercase",letterSpacing:".05em"}}>Add Item</div>
+              <div className="fr">
+                <div className="fg"><label>Item Name</label><input className="inp" placeholder="e.g. Paracetamol 500mg" value={itemRow.name} onChange={e=>setItemRow({...itemRow,name:e.target.value})}/></div>
+                <div className="fg"><label>Unit</label>
+                  <select className="inp" value={itemRow.unit} onChange={e=>setItemRow({...itemRow,unit:e.target.value})}>
+                    <option value="">Select...</option>
+                    <option>Tabs</option><option>Caps</option><option>Bottles</option><option>Vials</option><option>Sachets</option><option>Packets</option><option>Pieces</option><option>Cartons</option>
+                  </select>
+                </div>
+              </div>
+              <div className="fr">
+                <div className="fg"><label>Quantity</label><input className="inp" type="number" min={1} placeholder="0" value={itemRow.qty} onChange={e=>setItemRow({...itemRow,qty:e.target.value})}/></div>
+                <div className="fg"><label>Unit Cost (₦)</label><input className="inp" type="number" min={0} placeholder="0" value={itemRow.unitCost} onChange={e=>setItemRow({...itemRow,unitCost:e.target.value})}/></div>
+              </div>
+              {itemRow.qty&&itemRow.unitCost&&<div style={{fontSize:11,color:"#38bdf8",marginBottom:8}}>Line total: {fmt(+itemRow.qty*(+itemRow.unitCost||0))}</div>}
+              <button className="btn bp" onClick={addItem}><Ic d={I.plus} size={13}/> Add Item</button>
+            </div>
+
+            {/* Items added */}
+            {form.items.length>0&&(
+              <div style={{marginBottom:12}}>
+                {form.items.map((item,i)=>(
+                  <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0",borderBottom:"1px solid #1e2d45"}}>
+                    <div>
+                      <div style={{fontSize:13,color:"#e2e8f0",fontWeight:600}}>{item.name}</div>
+                      <div style={{fontSize:11,color:"#475569"}}>{item.qty} {item.unit} × {fmt(item.unitCost)}</div>
+                    </div>
+                    <div style={{display:"flex",alignItems:"center",gap:10}}>
+                      <span style={{color:"#4ade80",fontWeight:700}}>{fmt(item.totalCost)}</span>
+                      <button className="btn bd" style={{padding:"3px 7px"}} onClick={()=>setForm({...form,items:form.items.filter((_,j)=>j!==i)})}><Ic d={I.trash} size={11}/></button>
+                    </div>
+                  </div>
+                ))}
+                <div style={{textAlign:"right",marginTop:8,fontSize:16,fontWeight:800,color:"#4ade80"}}>
+                  Invoice Total: {fmt(form.items.reduce((a,i)=>a+i.totalCost,0))}
+                </div>
+              </div>
+            )}
+
+            <div className="fg"><label>Notes</label><textarea className="inp" rows={2} placeholder="Optional notes..." value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})}/></div>
+            <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+              <button className="btn bg" onClick={()=>setModal(false)}>Cancel</button>
+              <button className="btn bs" onClick={handleSave}><Ic d={I.check} size={13}/> Save Invoice</button>
             </div>
           </div>
         </div>
