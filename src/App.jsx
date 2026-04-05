@@ -354,20 +354,24 @@ export default function App() {
     })();
   },[]);
 
-  // Smart save — only persists what changed to the right Supabase table
+  // Smart save — each operation is independent so one failure never blocks another
+  // CRITICAL: audit log ALWAYS saves last, regardless of other failures
   const save = useCallback(async(d, ops={})=>{
     setData(d);
-    try {
-      if(ops.inventory)    await DB.saveInventory(d.inventory);
-      if(ops.delInvId)     await DB.deleteInventoryItem(ops.delInvId);
-      if(ops.sale)         await DB.saveSale(ops.sale);
-      if(ops.customers)    await DB.saveCustomers(d.customers);
-      if(ops.users)        await DB.saveUsers(d.users);
-      if(ops.settings)     await DB.saveSettings(d.settings);
-      if(ops.auditEntry)   await DB.saveAuditLog(ops.auditEntry);
-      if(ops.invoice)      await DB.saveInvoice(ops.invoice);
-      if(ops.delInvoiceId) await DB.deleteInvoice(ops.delInvoiceId);
-    } catch(e) { console.error("Save error:", e); }
+    const run = async(fn, label) => {
+      try { await fn(); }
+      catch(e) { console.error(`Save error [${label}]:`, e); }
+    };
+    if(ops.inventory)    await run(()=>DB.saveInventory(d.inventory),    "inventory");
+    if(ops.delInvId)     await run(()=>DB.deleteInventoryItem(ops.delInvId), "delInv");
+    if(ops.sale)         await run(()=>DB.saveSale(ops.sale),            "sale");
+    if(ops.customers)    await run(()=>DB.saveCustomers(d.customers),    "customers");
+    if(ops.users)        await run(()=>DB.saveUsers(d.users),            "users");
+    if(ops.settings)     await run(()=>DB.saveSettings(d.settings),      "settings");
+    if(ops.invoice)      await run(()=>DB.saveInvoice(ops.invoice),      "invoice");
+    if(ops.delInvoiceId) await run(()=>DB.deleteInvoice(ops.delInvoiceId),"delInvoice");
+    // Audit entry always runs last and independently — never skipped
+    if(ops.auditEntry)   await run(()=>DB.saveAuditLog(ops.auditEntry),  "auditLog");
   },[]);
 
   const addLog = useCallback((d, action, detail, user)=>{
@@ -1826,7 +1830,7 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
   const [search,setSearch]     = useState("");
   const E = {supplier:"",address:"",phone:"",date:now(),items:[],notes:""};
   const [form,setForm]         = useState(E);
-  const [itemRow,setItemRow]   = useState({name:"",qty:"",unit:"",unitCost:"",totalCost:""});
+  const [itemRow,setItemRow]   = useState({name:"",qty:"",unit:"",unitCost:"",totalCost:"",expiry:""});
 
   const filtered = invoices.filter(inv=>
     inv.supplier.toLowerCase().includes(search.toLowerCase())||
@@ -1840,7 +1844,7 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
     if(!itemRow.name||!itemRow.qty) return showToast("Item name and quantity required","error");
     const total = +itemRow.qty * (+itemRow.unitCost||0);
     setForm({...form, items:[...form.items,{...itemRow,qty:+itemRow.qty,unitCost:+itemRow.unitCost||0,totalCost:total}]});
-    setItemRow({name:"",qty:"",unit:"",unitCost:"",totalCost:""});
+    setItemRow({name:"",qty:"",unit:"",unitCost:"",totalCost:"",expiry:""});
   };
 
   const handleSave = () => {
@@ -1901,7 +1905,7 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
             </div>
             <div style={{fontWeight:700,color:"#f1f5f9",marginBottom:8,fontSize:13}}>Items Purchased</div>
             <table className="tbl" style={{marginBottom:14}}>
-              <thead><tr><th>Item</th><th>Qty</th><th>Unit</th><th>Unit Cost</th><th>Total</th></tr></thead>
+              <thead><tr><th>Item</th><th>Qty</th><th>Unit</th><th>Unit Cost</th><th>Total</th><th>Expiry</th></tr></thead>
               <tbody>
                 {viewModal.items.map((item,i)=>(
                   <tr key={i}>
@@ -1910,6 +1914,7 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
                     <td style={{color:"#64748b"}}>{item.unit||"—"}</td>
                     <td style={{color:"#94a3b8"}}>{item.unitCost>0?fmt(item.unitCost):"—"}</td>
                     <td style={{color:"#4ade80",fontWeight:700}}>{item.totalCost>0?fmt(item.totalCost):"—"}</td>
+                    <td style={{color:item.expiry&&days(item.expiry)<=60?"#fb923c":"#64748b",fontSize:11}}>{item.expiry||"—"}</td>
                   </tr>
                 ))}
               </tbody>
@@ -2002,6 +2007,7 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
                 <div className="fg"><label>Quantity</label><input className="inp" type="number" min={1} placeholder="0" value={itemRow.qty} onChange={e=>setItemRow({...itemRow,qty:e.target.value})}/></div>
                 <div className="fg"><label>Unit Cost (₦)</label><input className="inp" type="number" min={0} placeholder="0" value={itemRow.unitCost} onChange={e=>setItemRow({...itemRow,unitCost:e.target.value})}/></div>
               </div>
+              <div className="fg"><label>Expiry Date</label><input className="inp" type="date" value={itemRow.expiry} onChange={e=>setItemRow({...itemRow,expiry:e.target.value})}/></div>
               {itemRow.qty&&itemRow.unitCost&&<div style={{fontSize:11,color:"#38bdf8",marginBottom:8}}>Line total: {fmt(+itemRow.qty*(+itemRow.unitCost||0))}</div>}
               <button className="btn bp" onClick={addItem}><Ic d={I.plus} size={13}/> Add Item</button>
             </div>
@@ -2040,12 +2046,28 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  REPORTS
+//  REPORTS — with daily, custom date range
 // ═══════════════════════════════════════════════════════════════════
 function Reports({data}){
-  const [period,setPeriod] = useState("30");
-  const filtered = data.sales.filter(s=>{const d=new Date(s.date),c=new Date();c.setDate(c.getDate()-+period);return d>=c;});
+  const [mode,setMode]       = useState("today"); // today|yesterday|2days|7|30|90|365|custom
+  const [customFrom,setFrom] = useState("");
+  const [customTo,setTo]     = useState("");
+
+  const getDateRange = () => {
+    const today = now();
+    const d = (n) => { const x=new Date(); x.setDate(x.getDate()-n); return x.toISOString().split("T")[0]; };
+    if(mode==="today")     return {from:today, to:today, label:"Today"};
+    if(mode==="yesterday") return {from:d(1), to:d(1), label:"Yesterday"};
+    if(mode==="2days")     return {from:d(2), to:d(2), label:"2 Days Ago"};
+    if(mode==="custom")    return {from:customFrom||d(30), to:customTo||today, label:`${customFrom||d(30)} → ${customTo||today}`};
+    return {from:d(+mode), to:today, label:`Last ${mode} Days`};
+  };
+
+  const {from, to, label} = getDateRange();
+  const filtered = data.sales.filter(s=>s.date>=from&&s.date<=to);
   const revenue  = filtered.reduce((a,s)=>a+s.total,0);
+  const collected= filtered.reduce((a,s)=>a+(s.amountPaid||s.total),0);
+  const outstanding = filtered.reduce((a,s)=>a+(s.balanceOwed||0),0);
   const cost     = filtered.reduce((a,s)=>a+s.items.reduce((b,i)=>{const dr=data.inventory.find(d=>d.id===i.drugId);return b+(dr?dr.costPrice*i.qty:0);},0),0);
   const drugSales= {};
   filtered.forEach(s=>s.items.forEach(i=>{drugSales[i.name]=(drugSales[i.name]||0)+i.qty;}));
@@ -2055,53 +2077,130 @@ function Reports({data}){
   const maxDay   = Math.max(...Object.values(byDay),1);
   const bySelf   = {};
   filtered.forEach(s=>{bySelf[s.recordedBy||"Unknown"]=(bySelf[s.recordedBy||"Unknown"]||0)+s.total;});
+  const byPayment= {};
+  filtered.forEach(s=>{byPayment[s.paymentMethod||"Cash"]=(byPayment[s.paymentMethod||"Cash"]||0)+s.total;});
+
+  const quickBtns = [
+    ["today","Today"],["yesterday","Yesterday"],["2days","2 Days Ago"],
+    ["7","7 Days"],["30","30 Days"],["90","90 Days"],["365","1 Year"],["custom","Custom"]
+  ];
 
   return(
-    <div style={{display:"flex",flexDirection:"column",gap:18}}>
-      <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
-        {[["7","7 Days"],["30","30 Days"],["90","90 Days"],["365","1 Year"]].map(([v,l])=>(
-          <button key={v} className={`btn ${period===v?"bp":"bg"}`} style={{padding:"6px 14px"}} onClick={()=>setPeriod(v)}>{l}</button>
-        ))}
+    <div style={{display:"flex",flexDirection:"column",gap:16}}>
+
+      {/* Period selector */}
+      <div className="card" style={{padding:14}}>
+        <div style={{fontSize:11,fontWeight:700,color:"#475569",marginBottom:10,textTransform:"uppercase",letterSpacing:".05em"}}>Select Period</div>
+        <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:mode==="custom"?12:0}}>
+          {quickBtns.map(([v,l])=>(
+            <button key={v} className={`btn ${mode===v?"bp":"bg"}`} style={{padding:"6px 12px",fontSize:12}} onClick={()=>setMode(v)}>{l}</button>
+          ))}
+        </div>
+        {mode==="custom"&&(
+          <div style={{display:"flex",gap:10,alignItems:"center",marginTop:10,flexWrap:"wrap"}}>
+            <div className="fg" style={{marginBottom:0}}>
+              <label style={{fontSize:11,color:"#475569"}}>From</label>
+              <input className="inp" type="date" value={customFrom} onChange={e=>setFrom(e.target.value)} style={{width:160}}/>
+            </div>
+            <div className="fg" style={{marginBottom:0}}>
+              <label style={{fontSize:11,color:"#475569"}}>To</label>
+              <input className="inp" type="date" value={customTo} onChange={e=>setTo(e.target.value)} style={{width:160}}/>
+            </div>
+            <div style={{fontSize:12,color:"#38bdf8",marginTop:14}}>{filtered.length} transaction(s) found</div>
+          </div>
+        )}
+        {mode!=="custom"&&<div style={{fontSize:11,color:"#334155",marginTop:8}}>Showing: <span style={{color:"#38bdf8",fontWeight:700}}>{label}</span> — {filtered.length} transaction(s)</div>}
       </div>
-      <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:14}}>
-        {[{l:"Revenue",v:fmt(revenue),c:"#4ade80"},{l:"Est. Profit",v:fmt(revenue-cost),c:"#38bdf8"},{l:"Transactions",v:filtered.length,c:"#a78bfa"},{l:"Drugs Sold",v:Object.keys(drugSales).length,c:"#fb923c"}].map((s,i)=>(
-          <div key={i} style={{background:"linear-gradient(135deg,#0d1528,#0d1f3c)",border:"1px solid #1e3a5f",borderRadius:14,padding:18}}>
-            <div style={{fontSize:22,fontWeight:800,color:s.c}}>{s.v}</div>
-            <div style={{fontSize:12,color:"#475569",marginTop:4}}>{s.l}</div>
+
+      {/* Stats */}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(140px,1fr))",gap:12}}>
+        {[
+          {l:"Total Sales",   v:fmt(revenue),     c:"#4ade80"},
+          {l:"Collected",     v:fmt(collected),   c:"#38bdf8"},
+          {l:"Outstanding",   v:fmt(outstanding), c:outstanding>0?"#f87171":"#334155"},
+          {l:"Est. Profit",   v:fmt(revenue-cost),c:"#a78bfa"},
+          {l:"Transactions",  v:filtered.length,  c:"#fb923c"},
+          {l:"Drugs Sold",    v:Object.keys(drugSales).length, c:"#fbbf24"},
+        ].map((s,i)=>(
+          <div key={i} style={{background:"linear-gradient(135deg,#0d1528,#0d1f3c)",border:"1px solid #1e3a5f",borderRadius:14,padding:14}}>
+            <div style={{fontSize:20,fontWeight:800,color:s.c}}>{s.v}</div>
+            <div style={{fontSize:11,color:"#475569",marginTop:3}}>{s.l}</div>
           </div>
         ))}
       </div>
-      <div style={{display:"grid",gridTemplateColumns:"2fr 1fr",gap:16}}>
+
+      {/* Sales list for daily views */}
+      {(mode==="today"||mode==="yesterday"||mode==="2days")&&(
+        <div className="card" style={{padding:0}}>
+          <div style={{padding:"12px 16px",borderBottom:"1px solid #1e2d45",fontWeight:700,color:"#f1f5f9",fontSize:13}}>
+            📋 {label} — Individual Sales
+          </div>
+          <table className="tbl">
+            <thead><tr><th>Time</th><th>Items</th><th>Customer</th><th>Payment</th><th>Total</th><th>Paid</th><th>Balance</th></tr></thead>
+            <tbody>
+              {filtered.length===0
+                ? <tr><td colSpan={7} style={{textAlign:"center",padding:24,color:"#334155"}}>No sales for this day</td></tr>
+                : [...filtered].reverse().map(s=>(
+                  <tr key={s.id}>
+                    <td style={{color:"#64748b",fontSize:11}}>{s.date}</td>
+                    <td style={{fontSize:11,color:"#e2e8f0"}}>{s.items.map(i=>i.name).join(", ").slice(0,40)}</td>
+                    <td style={{color:"#94a3b8",fontSize:11}}>{s.customer||"Walk-in"}</td>
+                    <td><span style={{fontSize:10,padding:"2px 6px",borderRadius:5,fontWeight:700,
+                      background:s.paymentMethod==="Cash"?"#052e16":s.paymentMethod==="Transfer"?"#172554":"#2d1b69",
+                      color:s.paymentMethod==="Cash"?"#4ade80":s.paymentMethod==="Transfer"?"#93c5fd":"#a78bfa"}}>
+                      {s.paymentMethod||"Cash"}
+                    </span></td>
+                    <td style={{color:"#4ade80",fontWeight:700}}>{fmt(s.total)}</td>
+                    <td style={{color:"#38bdf8"}}>{fmt(s.amountPaid||s.total)}</td>
+                    <td style={{color:s.balanceOwed>0?"#f87171":"#334155",fontWeight:s.balanceOwed>0?700:400}}>{s.balanceOwed>0?fmt(s.balanceOwed):"—"}</td>
+                  </tr>
+                ))
+              }
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Charts for multi-day views */}
+      {mode!=="today"&&mode!=="yesterday"&&mode!=="2days"&&(
         <div className="card">
-          <div style={{fontSize:14,fontWeight:700,color:"#f1f5f9",marginBottom:14}}>Daily Revenue</div>
+          <div style={{fontSize:14,fontWeight:700,color:"#f1f5f9",marginBottom:14}}>Daily Revenue Breakdown</div>
           {Object.keys(byDay).length===0
             ? <div style={{color:"#334155",fontSize:13}}>No data for this period</div>
-            : Object.entries(byDay).sort((a,b)=>a[0].localeCompare(b[0])).slice(-14).map(([d,v])=>(
+            : Object.entries(byDay).sort((a,b)=>a[0].localeCompare(b[0])).slice(-30).map(([d,v])=>(
               <div key={d} style={{display:"flex",alignItems:"center",gap:10,marginBottom:6}}>
-                <div style={{width:72,fontSize:11,color:"#475569",flexShrink:0}}>{d.slice(5)}</div>
+                <div style={{width:80,fontSize:11,color:"#475569",flexShrink:0}}>{d}</div>
                 <div style={{flex:1,background:"#0a1525",borderRadius:4,height:18,overflow:"hidden"}}>
                   <div style={{height:"100%",width:`${(v/maxDay)*100}%`,background:"linear-gradient(90deg,#0369a1,#38bdf8)",borderRadius:4}}/>
                 </div>
-                <div style={{width:80,fontSize:11,color:"#4ade80",textAlign:"right",fontWeight:700}}>{fmt(v)}</div>
+                <div style={{width:90,fontSize:11,color:"#4ade80",textAlign:"right",fontWeight:700}}>{fmt(v)}</div>
               </div>
             ))
           }
         </div>
-        <div style={{display:"flex",flexDirection:"column",gap:14}}>
-          <div className="card">
-            <div style={{fontSize:14,fontWeight:700,color:"#f1f5f9",marginBottom:10}}>Top Drugs</div>
-            {top.length===0
-              ? <div style={{color:"#334155",fontSize:12}}>No data</div>
-              : top.map(([n,q])=><div key={n} style={{display:"flex",justifyContent:"space-between",marginBottom:7,fontSize:12}}><span style={{color:"#94a3b8"}}>{n.slice(0,22)}</span><span style={{color:"#38bdf8",fontWeight:700}}>{q}u</span></div>)
-            }
-          </div>
-          <div className="card">
-            <div style={{fontSize:14,fontWeight:700,color:"#f1f5f9",marginBottom:10}}>Revenue by Staff</div>
-            {Object.keys(bySelf).length===0
-              ? <div style={{color:"#334155",fontSize:12}}>No data</div>
-              : Object.entries(bySelf).map(([name,rev])=><div key={name} style={{display:"flex",justifyContent:"space-between",marginBottom:7,fontSize:12}}><span style={{color:"#94a3b8"}}>{name}</span><span style={{color:"#a78bfa",fontWeight:700}}>{fmt(rev)}</span></div>)
-            }
-          </div>
+      )}
+
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14}}>
+        <div className="card">
+          <div style={{fontSize:13,fontWeight:700,color:"#f1f5f9",marginBottom:10}}>🏆 Top Drugs</div>
+          {top.length===0
+            ? <div style={{color:"#334155",fontSize:12}}>No data</div>
+            : top.map(([n,q])=><div key={n} style={{display:"flex",justifyContent:"space-between",marginBottom:7,fontSize:12}}><span style={{color:"#94a3b8"}}>{n.slice(0,22)}</span><span style={{color:"#38bdf8",fontWeight:700}}>{q}u</span></div>)
+          }
+        </div>
+        <div className="card">
+          <div style={{fontSize:13,fontWeight:700,color:"#f1f5f9",marginBottom:10}}>💳 By Payment</div>
+          {Object.keys(byPayment).length===0
+            ? <div style={{color:"#334155",fontSize:12}}>No data</div>
+            : Object.entries(byPayment).map(([m,v])=><div key={m} style={{display:"flex",justifyContent:"space-between",marginBottom:7,fontSize:12}}><span style={{color:"#94a3b8"}}>{m}</span><span style={{color:"#4ade80",fontWeight:700}}>{fmt(v)}</span></div>)
+          }
+        </div>
+        <div className="card">
+          <div style={{fontSize:13,fontWeight:700,color:"#f1f5f9",marginBottom:10}}>👤 By Staff</div>
+          {Object.keys(bySelf).length===0
+            ? <div style={{color:"#334155",fontSize:12}}>No data</div>
+            : Object.entries(bySelf).map(([name,rev])=><div key={name} style={{display:"flex",justifyContent:"space-between",marginBottom:7,fontSize:12}}><span style={{color:"#94a3b8"}}>{name.slice(0,18)}</span><span style={{color:"#a78bfa",fontWeight:700}}>{fmt(rev)}</span></div>)
+          }
         </div>
       </div>
     </div>
