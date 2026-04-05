@@ -43,7 +43,7 @@ const DB = {
         supa("inventory?select=*&order=name.asc"),
         supa("sales?select=*&order=timestamp.desc"),
         supa("customers?select=*&order=name.asc"),
-        supa("audit_log?select=*&order=timestamp.desc&limit=300"),
+        supa("audit_log?select=*&order=timestamp.desc&limit=1000"),
         supa("settings?select=*"),
         supa("invoices?select=*&order=date.desc"),
       ]);
@@ -372,7 +372,7 @@ export default function App() {
 
   const addLog = useCallback((d, action, detail, user)=>{
     const entry = {id:uid(), action, detail, user:user?.name||"System", role:user?.role||"system", timestamp:ts()};
-    return [{...d, auditLog:[entry,...(d.auditLog||[])].slice(0,300)}, entry];
+    return [{...d, auditLog:[entry,...(d.auditLog||[])].slice(0,1000)}, entry];
   },[]);
 
   const showToast = (msg, type="success") => {
@@ -2371,26 +2371,57 @@ function UserMgmt({data, session, save, addLog, showToast}){
 //  AUDIT LOG
 // ═══════════════════════════════════════════════════════════════════
 function AuditLog({data}){
-  const [filter,setFilter] = useState("ALL");
-  const types = ["ALL","LOGIN","SALE_RECORDED","INVENTORY_ADD","INVENTORY_UPDATE","USER_ADD","USER_STATUS"];
-  const filtered = (data.auditLog||[]).filter(e=>filter==="ALL"||e.action===filter);
-  const colors = {LOGIN:"#38bdf8",LOGOUT:"#64748b",SALE_RECORDED:"#4ade80",INVENTORY_ADD:"#a78bfa",INVENTORY_UPDATE:"#fb923c",INVENTORY_DELETE:"#f87171",USER_ADD:"#34d399",USER_UPDATE:"#60a5fa",USER_STATUS:"#fbbf24",CUSTOMER_ADD:"#a78bfa",SETTINGS_UPDATE:"#94a3b8"};
+  const [filter,setFilter]   = useState("ALL");
+  const [logs,setLogs]       = useState(data.auditLog||[]);
+  const [loading,setLoading] = useState(false);
+  const [lastRefresh,setLast]= useState(null);
+
+  const colors = {LOGIN:"#38bdf8",LOGOUT:"#64748b",SALE_RECORDED:"#4ade80",SALE_DELETED:"#f87171",INVENTORY_ADD:"#a78bfa",INVENTORY_UPDATE:"#fb923c",INVENTORY_DELETE:"#f87171",INVOICE_ADDED:"#38bdf8",INVOICE_DELETED:"#f87171",USER_ADD:"#34d399",USER_UPDATE:"#60a5fa",USER_STATUS:"#fbbf24",CUSTOMER_ADD:"#a78bfa",CUSTOMER_UPDATE:"#fb923c",SETTINGS_UPDATE:"#94a3b8",DEBT_PAYMENT:"#4ade80",DEBT_CLEARED:"#4ade80"};
+
+  const fetchLogs = async() => {
+    setLoading(true);
+    try {
+      const rows = await supa("audit_log?select=*&order=timestamp.desc&limit=1000");
+      if(Array.isArray(rows) && rows.length > 0) setLogs(rows);
+    } catch(e) { console.error("Audit log fetch error:", e); }
+    setLoading(false);
+    setLast(new Date().toLocaleTimeString("en-NG"));
+  };
+
+  // Auto-refresh when component mounts to get latest from Supabase
+  useEffect(()=>{ fetchLogs(); },[]);
+
+  const types = ["ALL","LOGIN","SALE_RECORDED","SALE_DELETED","INVENTORY_ADD","INVENTORY_UPDATE","INVENTORY_DELETE","DEBT_PAYMENT","CUSTOMER_ADD","USER_ADD","USER_STATUS"];
+  const filtered = logs.filter(e=>filter==="ALL"||e.action===filter);
 
   return(
     <div>
-      <div style={{display:"flex",gap:8,marginBottom:16,flexWrap:"wrap"}}>
-        {types.map(t=><button key={t} className={`btn ${filter===t?"bp":"bg"}`} style={{padding:"5px 12px",fontSize:11}} onClick={()=>setFilter(t)}>{t.replace(/_/g," ")}</button>)}
+      <div style={{display:"flex",gap:8,marginBottom:12,flexWrap:"wrap",alignItems:"center"}}>
+        <button className="btn bp" style={{padding:"5px 14px",fontSize:11}} onClick={fetchLogs} disabled={loading}>
+          {loading?"⏳ Loading...":"🔄 Refresh"}
+        </button>
+        {lastRefresh&&<span style={{fontSize:11,color:"#475569"}}>Last refreshed: {lastRefresh}</span>}
+        <span style={{fontSize:11,color:"#334155",marginLeft:"auto"}}>{filtered.length} entries</span>
+      </div>
+      <div style={{display:"flex",gap:6,marginBottom:14,flexWrap:"wrap"}}>
+        {types.map(t=>(
+          <button key={t} className={`btn ${filter===t?"bp":"bg"}`} style={{padding:"4px 10px",fontSize:10}} onClick={()=>setFilter(t)}>
+            {t.replace(/_/g," ")}
+          </button>
+        ))}
       </div>
       <div className="card" style={{padding:0}}>
         <table className="tbl">
           <thead><tr><th>Timestamp</th><th>Action</th><th>Detail</th><th>User</th><th>Role</th></tr></thead>
           <tbody>
-            {filtered.length===0
-              ? <tr><td colSpan={5} style={{textAlign:"center",padding:32,color:"#334155"}}>No log entries yet. Actions appear here as they happen.</td></tr>
+            {loading
+              ? <tr><td colSpan={5} style={{textAlign:"center",padding:32,color:"#38bdf8"}}>Loading audit log from database...</td></tr>
+              : filtered.length===0
+              ? <tr><td colSpan={5} style={{textAlign:"center",padding:32,color:"#334155"}}>No entries found for this filter.</td></tr>
               : filtered.map(e=>(
                 <tr key={e.id}>
                   <td style={{color:"#475569",fontSize:11,whiteSpace:"nowrap"}}>{e.timestamp}</td>
-                  <td><span style={{fontSize:11,fontWeight:700,color:colors[e.action]||"#94a3b8",background:"rgba(0,0,0,.3)",padding:"2px 8px",borderRadius:6}}>{e.action}</span></td>
+                  <td><span style={{fontSize:10,fontWeight:700,color:colors[e.action]||"#94a3b8",background:"rgba(0,0,0,.3)",padding:"2px 7px",borderRadius:6,whiteSpace:"nowrap"}}>{e.action}</span></td>
                   <td style={{color:"#94a3b8",fontSize:12}}>{e.detail}</td>
                   <td style={{color:"#e2e8f0",fontSize:12,fontWeight:600}}>{e.user}</td>
                   <td><span className={`role-${e.role}`}>{e.role}</span></td>
@@ -2400,7 +2431,9 @@ function AuditLog({data}){
           </tbody>
         </table>
       </div>
-      <div style={{marginTop:10,fontSize:12,color:"#334155",textAlign:"center"}}>Showing last {filtered.length} entries. Log retains up to 300 entries.</div>
+      <div style={{marginTop:8,fontSize:11,color:"#334155",textAlign:"center"}}>
+        Showing {filtered.length} of {logs.length} total entries — click Refresh to get latest
+      </div>
     </div>
   );
 }
