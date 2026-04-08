@@ -1136,7 +1136,7 @@ function Inventory({data, session, save, addLog, showToast, role}){
     showToast("AI filled drug details — please complete and verify");
   };
 
-  const handleSave = () => {
+  const handleSave = async() => {
     if(!form.name||!form.qty||!form.sellingPrice) return showToast("Name, quantity and price are required","error");
     const inv = editing
       ? data.inventory.map(i=>i.id===editing?{...form,id:editing}:i)
@@ -1145,9 +1145,9 @@ function Inventory({data, session, save, addLog, showToast, role}){
     save(d2,{inventory:true,auditEntry:entry}); showToast(editing?"Drug updated successfully":"Drug added successfully"); setModal(false);
   };
 
-  const handleDel = (item) => { if(!isOwner) return; setConfirm(item); };
+  const handleDel = async(item) => { if(!isOwner) return; setConfirm(item); };
 
-  const confirmDelete = () => {
+  const confirmDelete = async() => {
     const item = confirmDel;
     const [d2,entry] = addLog({...data,inventory:data.inventory.filter(i=>i.id!==item.id)}, "INVENTORY_DELETE", `Removed: ${item.name}`, session);
     save(d2,{inventory:true,delInvId:item.id,auditEntry:entry});
@@ -1327,7 +1327,7 @@ function Sales({data, session, save, addLog, showToast, role}){
     setCart({drugId:"",qty:1,customPrice:""});
   };
 
-  const doSale = () => {
+  const doSale = async() => {
     if(form.items.length===0) return showToast("Add at least one item","error");
     const amtPaid = form.isPartPayment ? (+form.amountPaid||0) : total;
     if(form.isPartPayment && amtPaid<0) return showToast("Amount paid cannot be negative","error");
@@ -1357,7 +1357,7 @@ function Sales({data, session, save, addLog, showToast, role}){
 
   const openPay = (sale) => { setPayModal(sale); setPayAmt(""); };
 
-  const confirmDelSale = () => {
+  const confirmDelSale = async() => {
     const sale = delSale;
     const newSales = data.sales.filter(s=>s.id!==sale.id);
     // Restore inventory quantities when sale is deleted
@@ -1374,7 +1374,7 @@ function Sales({data, session, save, addLog, showToast, role}){
     setDelSale(null);
   };
 
-  const applyPayment = (payAll) => {
+  const applyPayment = async(payAll) => {
     const sale = payModal;
     const amt = payAll ? sale.balanceOwed : +payAmt;
     if(!payAll && (!amt || amt<=0)) return showToast("Enter a valid amount","error");
@@ -1783,7 +1783,7 @@ function Records({data, session, save, addLog, showToast}){
 
   const getPurchaseHistory = (name) => data.sales.filter(s=>s.customer===name).sort((a,b)=>b.timestamp-a.timestamp);
 
-  const handleSave = () => {
+  const handleSave = async() => {
     if(!form.name) return showToast("Customer name is required","error");
     const customers = editing
       ? data.customers.map(c=>c.id===editing?{...form,id:editing}:c)
@@ -1972,7 +1972,7 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
     setItemRow({name:"",qty:"",unit:"",unitCost:"",totalCost:"",expiry:""});
   };
 
-  const handleSave = () => {
+  const handleSave = async() => {
     if(!form.supplier) return showToast("Supplier name is required","error");
     if(form.items.length===0) return showToast("Add at least one item","error");
     const total = form.items.reduce((a,i)=>a+i.totalCost,0);
@@ -1984,7 +1984,7 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
     setModal(false); setForm(E);
   };
 
-  const handleDel = () => {
+  const handleDel = async() => {
     const inv = confirmDel;
     const newInvoices = invoices.filter(i=>i.id!==inv.id);
     const [d2,entry] = addLog({...data,invoices:newInvoices},"INVOICE_DELETED",`Invoice deleted: ${inv.supplier} — ${fmt(inv.total)}`,session);
@@ -2485,7 +2485,7 @@ function UserMgmt({data, session, save, addLog, showToast}){
   const [form,setForm] = useState(E);
   const avatars = ["👩‍⚕️","🧑‍💼","👨‍⚕️","👩‍💼","🧑‍🔬","👨‍💼"];
 
-  const handleSave = () => {
+  const handleSave = async() => {
     if(!form.name||!form.email) return showToast("Name and email are required","error");
     if(!editing&&!form.password) return showToast("Password is required for new users","error");
     if(data.users.some(u=>u.email===form.email&&u.id!==editing)) return showToast("This email is already in use","error");
@@ -2493,11 +2493,11 @@ function UserMgmt({data, session, save, addLog, showToast}){
       ? data.users.map(u=>u.id===editing?{...u,...form,password:form.password||u.password}:u)
       : [...data.users,{...form,id:uid(),createdAt:now()}];
     const [d2u,eu] = addLog({...data,users}, editing?"USER_UPDATE":"USER_ADD", `${editing?"Updated":"Added"}: ${form.name} (${form.role})`, session);
-    save(d2u,{users:true,auditEntry:eu});
-    showToast(editing?"User updated":"New user added"); setModal(false);
+    const ok = await save(d2u,{users:true,auditEntry:eu});
+    if(ok!==false){ showToast(editing?"User updated":"New user added"); setModal(false); }
   };
 
-  const toggleActive = (user) => {
+  const toggleActive = async(user) => {
     if(user.id===session.id) return showToast("You cannot deactivate your own account","error");
     const users = data.users.map(u=>u.id===user.id?{...u,active:!u.active}:u);
     const [d2t,et] = addLog({...data,users}, "USER_STATUS", `${user.active?"Deactivated":"Activated"}: ${user.name}`, session);
@@ -2668,7 +2668,7 @@ function AuditLog({data}){
 function Settings({data, session, save, addLog, showToast, updateSession}){
   const [form,setForm] = useState({...data.settings});
 
-  const handleSave = () => {
+  const handleSave = async() => {
     // ── FIX: if owner name changed, update the live session immediately ──
     if(session.role==="owner" && form.ownerName !== session.name){
       updateSession({name: form.ownerName});
