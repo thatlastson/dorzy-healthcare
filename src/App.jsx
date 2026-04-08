@@ -368,9 +368,11 @@ export default function App() {
 
   // Smart save — each operation is independent so one failure never blocks another
   // CRITICAL: audit log ALWAYS saves last, regardless of other failures
-  // CRITICAL: failed saves show error to user and must be retried — no silent failures
-  const save = useCallback(async(d, ops={})=>{
-    setData(d);
+  // CRITICAL: failed saves ROLL BACK the UI and alert user — no false success ever
+  // CRITICAL: after every successful save, reload from Supabase to confirm (P15/P16)
+  const save = useCallback(async(d, ops={}, previousData=null)=>{
+    const prev = previousData;
+    setData(d); // Optimistic update — show change immediately
     const failures = [];
     const run = async(fn, label) => {
       try { await fn(); }
@@ -390,16 +392,27 @@ export default function App() {
     if(ops.delInvoiceId)  await run(()=>DB.deleteInvoice(ops.delInvoiceId),       "delete invoice");
     // Audit entry always runs last and independently — never skipped
     if(ops.auditEntry)    await run(()=>DB.saveAuditLog(ops.auditEntry),          "auditLog");
-    // If any critical operation failed — alert the user immediately
+    // If any critical operation failed — ROLL BACK UI and alert user
     const criticalFails = failures.filter(f=>f!=="auditLog");
     if(criticalFails.length > 0) {
+      if(prev) setData(prev); // Roll back to pre-save state
       setToast({
-        msg:`⚠️ Save failed for: ${criticalFails.join(", ")}. Check your internet and try again. Do NOT close the app.`,
+        msg:`❌ NOT SAVED — ${criticalFails.join(", ")} failed. Check your internet and try again.`,
         type:"error"
       });
-      // Keep error visible longer for critical failures
-      setTimeout(()=>setToast(null), 8000);
+      setTimeout(()=>setToast(null), 10000);
+      return false;
     }
+    // P15/P16: After successful save, reload from Supabase to confirm DB and app are in sync
+    // This catches any silent discrepancies between what we sent and what DB stored
+    try {
+      const confirmed = await DB.load();
+      if(confirmed) setData(confirmed);
+    } catch(e) {
+      // Load failed after save — not critical, optimistic update stands
+      console.warn("Post-save reload failed — using optimistic state:", e);
+    }
+    return true;
   },[]);
 
   const addLog = useCallback((d, action, detail, user)=>{
@@ -1262,9 +1275,12 @@ function Sales({data, session, save, addLog, showToast, role}){
   const [receiptSale,setReceipt] = useState(null);
   const [tab,setTab]             = useState("sales"); // "sales" | "debtors"
   const [search,setSearch]       = useState("");
+  const resetPage = () => setSalesPage(1);
   const [payModal,setPayModal]   = useState(null); // sale being paid
   const [payAmt,setPayAmt]       = useState("");
   const [delSale,setDelSale]     = useState(null); // sale pending deletion
+  const [salesPage,setSalesPage] = useState(1);
+  const SALES_PER_PAGE = 50;
   const E = {type:"OTC",customer:"",date:now(),items:[],notes:"",paymentMethod:"Cash",amountPaid:"",isPartPayment:false,discount:"",serviceCharge:""};
   const [form,setForm]           = useState(E);
   const [cart,setCart]           = useState({drugId:"",qty:1,customPrice:""});
@@ -1286,12 +1302,14 @@ function Sales({data, session, save, addLog, showToast, role}){
   const debtors = data.sales.filter(s=>s.balanceOwed>0);
   const totalDebt = debtors.reduce((a,s)=>a+s.balanceOwed,0);
 
-  const filteredSales = data.sales.filter(s=>{
+  const allFilteredSales = data.sales.filter(s=>{
     if(!search) return true;
     return (s.customer||"Walk-in").toLowerCase().includes(search.toLowerCase()) ||
            s.date.includes(search) ||
            s.items.some(i=>i.name.toLowerCase().includes(search.toLowerCase()));
   });
+  const totalSalesPages = Math.ceil(allFilteredSales.length / SALES_PER_PAGE);
+  const filteredSales = allFilteredSales.slice((salesPage-1)*SALES_PER_PAGE, salesPage*SALES_PER_PAGE);
 
   const addCart = () => {
     if(!cart.drugId) return;
@@ -1329,11 +1347,12 @@ function Sales({data, session, save, addLog, showToast, role}){
     const [d2,entry] = addLog({...data,sales:[...data.sales,sale],inventory:newInv}, "SALE_RECORDED",
       `${fmt(total)} by ${session.name}${balOwed>0?" — Part payment, balance: "+fmt(balOwed):""}`, session);
     // CRITICAL FIX: Only save the specific drugs whose qty changed
-    // Never send full inventory array after a sale — prevents stale data overwrites
     const changedDrugs = newInv.filter(drug=>form.items.find(i=>i.drugId===drug.id));
-    save(d2,{saleInventory:changedDrugs,sale:sale,auditEntry:entry});
-    setModal(false); setReceipt(sale); setForm(E);
-    showToast(balOwed>0?`Sale recorded! Balance owed: ${fmt(balOwed)}`:"Sale recorded! Receipt ready to print.");
+    const ok = await save(d2,{saleInventory:changedDrugs,sale:sale,auditEntry:entry}, data);
+    if(ok!==false){
+      setModal(false); setReceipt(sale); setForm(E);
+      showToast(balOwed>0?`Sale recorded! Balance owed: ${fmt(balOwed)}`:"Sale recorded! Receipt ready to print.");
+    }
   };
 
   const openPay = (sale) => { setPayModal(sale); setPayAmt(""); };
@@ -1366,9 +1385,11 @@ function Sales({data, session, save, addLog, showToast, role}){
     const newSales = data.sales.map(s=>s.id===sale.id?updated:s);
     const [d2,entry] = addLog({...data,sales:newSales}, "DEBT_PAYMENT",
       `Payment of ${fmt(amt)} received from ${sale.customer||"Walk-in"}${newBalance>0?` — remaining: ${fmt(newBalance)}`:" — FULLY CLEARED"}`, session);
-    save(d2,{sale:updated,auditEntry:entry});
-    showToast(newBalance>0?`₦${amt.toLocaleString()} received. Remaining balance: ${fmt(newBalance)}`:`Balance fully cleared for ${sale.customer||"Walk-in"}`);
-    setPayModal(null); setPayAmt("");
+    const ok = await save(d2,{sale:updated,auditEntry:entry}, data);
+    if(ok!==false){
+      showToast(newBalance>0?`₦${amt.toLocaleString()} received. Remaining balance: ${fmt(newBalance)}`:`Balance fully cleared for ${sale.customer||"Walk-in"}`);
+      setPayModal(null); setPayAmt("");
+    }
   };
 
   return(
@@ -1384,7 +1405,7 @@ function Sales({data, session, save, addLog, showToast, role}){
             </button>
           ))}
         </div>
-        <input className="inp" style={{maxWidth:240}} placeholder="Search sales, customer, drug..." value={search} onChange={e=>setSearch(e.target.value)}/>
+        <input className="inp" style={{maxWidth:240}} placeholder="Search sales, customer, drug..." value={search} onChange={e=>{setSearch(e.target.value);resetPage();}}/>
         <button className="btn bs" style={{marginLeft:"auto"}} onClick={()=>setModal(true)}><Ic d={I.plus} size={13}/> New Sale</button>
       </div>
 
@@ -1422,6 +1443,28 @@ function Sales({data, session, save, addLog, showToast, role}){
               }
             </tbody>
           </table>
+          {/* Pagination Controls */}
+          {totalSalesPages > 1 && (
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",padding:"12px 16px",borderTop:"1px solid #1e2d45",flexWrap:"wrap",gap:8}}>
+              <div style={{fontSize:12,color:"#475569"}}>
+                Showing {((salesPage-1)*SALES_PER_PAGE)+1}–{Math.min(salesPage*SALES_PER_PAGE, allFilteredSales.length)} of <strong style={{color:"#38bdf8"}}>{allFilteredSales.length}</strong> sales
+              </div>
+              <div style={{display:"flex",gap:5,alignItems:"center"}}>
+                <button className="btn bg" style={{padding:"4px 10px",fontSize:12}} onClick={()=>setSalesPage(1)} disabled={salesPage===1}>««</button>
+                <button className="btn bg" style={{padding:"4px 12px",fontSize:12}} onClick={()=>setSalesPage(p=>Math.max(1,p-1))} disabled={salesPage===1}>‹</button>
+                <span style={{fontSize:12,color:"#94a3b8",padding:"0 10px",background:"#0d1528",borderRadius:6,border:"1px solid #1e2d45",lineHeight:"28px"}}>
+                  {salesPage} / {totalSalesPages}
+                </span>
+                <button className="btn bg" style={{padding:"4px 12px",fontSize:12}} onClick={()=>setSalesPage(p=>Math.min(totalSalesPages,p+1))} disabled={salesPage===totalSalesPages}>›</button>
+                <button className="btn bg" style={{padding:"4px 10px",fontSize:12}} onClick={()=>setSalesPage(totalSalesPages)} disabled={salesPage===totalSalesPages}>»»</button>
+              </div>
+            </div>
+          )}
+          {totalSalesPages <= 1 && allFilteredSales.length > 0 && (
+            <div style={{padding:"10px 16px",fontSize:12,color:"#334155",borderTop:"1px solid #1e2d45"}}>
+              Showing all {allFilteredSales.length} sales
+            </div>
+          )}
         </div>
       )}
 
