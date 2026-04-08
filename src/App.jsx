@@ -49,7 +49,7 @@ const DB = {
       ]);
       // Map snake_case DB columns back to camelCase for the app
       const mapInv = i => ({...i, costPrice:i.cost_price, sellingPrice:i.selling_price, reorderLevel:i.reorder_level});
-      const mapSale = s => ({...s, recordedBy:s.recorded_by, recordedById:s.recorded_by_id, items:s.items||[], paymentMethod:s.payment_method||'Cash', amountPaid:s.amount_paid||s.total, balanceOwed:s.balance_owed||0, isPartPayment:s.is_part_payment||false});
+      const mapSale = s => ({...s, recordedBy:s.recorded_by, recordedById:s.recorded_by_id, items:s.items||[], paymentMethod:s.payment_method||'Cash', amountPaid:s.amount_paid||s.total, balanceOwed:s.balance_owed||0, isPartPayment:s.is_part_payment||false, discount:s.discount||0, serviceCharge:s.service_charge||0});
       const mapUser = u => ({...u, createdAt:u.created_at});
       const mapCust = c => ({...c, createdAt:c.created_at});
       const mapLog  = l => ({...l});
@@ -114,6 +114,8 @@ const DB = {
       amount_paid: sale.amountPaid||sale.total,
       balance_owed: sale.balanceOwed||0,
       is_part_payment: sale.isPartPayment||false,
+      discount: sale.discount||0,
+      service_charge: sale.serviceCharge||0,
     };
     await supa("sales?on_conflict=id", "POST", [row]);
   },
@@ -366,23 +368,38 @@ export default function App() {
 
   // Smart save — each operation is independent so one failure never blocks another
   // CRITICAL: audit log ALWAYS saves last, regardless of other failures
+  // CRITICAL: failed saves show error to user and must be retried — no silent failures
   const save = useCallback(async(d, ops={})=>{
     setData(d);
+    const failures = [];
     const run = async(fn, label) => {
       try { await fn(); }
-      catch(e) { console.error(`Save error [${label}]:`, e); }
+      catch(e) {
+        console.error(`Save error [${label}]:`, e);
+        failures.push(label);
+      }
     };
-    if(ops.inventory)    await run(()=>DB.saveInventory(d.inventory),    "inventory");
-    if(ops.saleInventory) await run(()=>DB.saveInventoryItems(ops.saleInventory), "saleInventory");
-    if(ops.delInvId)     await run(()=>DB.deleteInventoryItem(ops.delInvId), "delInv");
-    if(ops.sale)         await run(()=>DB.saveSale(ops.sale),            "sale");
-    if(ops.customers)    await run(()=>DB.saveCustomers(d.customers),    "customers");
-    if(ops.users)        await run(()=>DB.saveUsers(d.users),            "users");
-    if(ops.settings)     await run(()=>DB.saveSettings(d.settings),      "settings");
-    if(ops.invoice)      await run(()=>DB.saveInvoice(ops.invoice),      "invoice");
-    if(ops.delInvoiceId) await run(()=>DB.deleteInvoice(ops.delInvoiceId),"delInvoice");
+    if(ops.inventory)     await run(()=>DB.saveInventory(d.inventory),           "inventory");
+    if(ops.saleInventory) await run(()=>DB.saveInventoryItems(ops.saleInventory), "stock update");
+    if(ops.delInvId)      await run(()=>DB.deleteInventoryItem(ops.delInvId),     "delete drug");
+    if(ops.sale)          await run(()=>DB.saveSale(ops.sale),                    "sale record");
+    if(ops.customers)     await run(()=>DB.saveCustomers(d.customers),            "customer");
+    if(ops.users)         await run(()=>DB.saveUsers(d.users),                    "user");
+    if(ops.settings)      await run(()=>DB.saveSettings(d.settings),              "settings");
+    if(ops.invoice)       await run(()=>DB.saveInvoice(ops.invoice),              "invoice");
+    if(ops.delInvoiceId)  await run(()=>DB.deleteInvoice(ops.delInvoiceId),       "delete invoice");
     // Audit entry always runs last and independently — never skipped
-    if(ops.auditEntry)   await run(()=>DB.saveAuditLog(ops.auditEntry),  "auditLog");
+    if(ops.auditEntry)    await run(()=>DB.saveAuditLog(ops.auditEntry),          "auditLog");
+    // If any critical operation failed — alert the user immediately
+    const criticalFails = failures.filter(f=>f!=="auditLog");
+    if(criticalFails.length > 0) {
+      setToast({
+        msg:`⚠️ Save failed for: ${criticalFails.join(", ")}. Check your internet and try again. Do NOT close the app.`,
+        type:"error"
+      });
+      // Keep error visible longer for critical failures
+      setTimeout(()=>setToast(null), 8000);
+    }
   },[]);
 
   const addLog = useCallback((d, action, detail, user)=>{
@@ -891,7 +908,13 @@ function ReceiptModal({sale, settings, onClose}){
       <div class="row small"><span>${i.qty} unit(s) × ₦${i.price.toLocaleString()}</span><span>₦${i.subtotal.toLocaleString()}</span></div>
     `).join("")}
     <div class="dashed"></div>
-    <div class="row bold total"><span>TOTAL BILL</span><span>₦${sale.total.toLocaleString()}</span></div>
+    ${(sale.discount>0||sale.serviceCharge>0)?`
+    <div class="row"><span>Subtotal</span><span>₦${(sale.subtotal||sale.total).toLocaleString()}</span></div>
+    ${sale.discount>0?`<div class="row" style="color:#e65c00"><span>Discount</span><span>-₦${sale.discount.toLocaleString()}</span></div>`:""}
+    ${sale.serviceCharge>0?`<div class="row" style="color:#0066cc"><span>Service Charge</span><span>+₦${sale.serviceCharge.toLocaleString()}</span></div>`:""}
+    <div class="dashed"></div>
+    `:""}
+    <div class="row bold total"><span>TOTAL</span><span>₦${sale.total.toLocaleString()}</span></div>
     ${sale.isPartPayment?`
     <div class="dashed"></div>
     <div class="row bold" style="color:#2a7a2a"><span>AMOUNT PAID</span><span>₦${(sale.amountPaid||0).toLocaleString()}</span></div>
@@ -1242,11 +1265,14 @@ function Sales({data, session, save, addLog, showToast, role}){
   const [payModal,setPayModal]   = useState(null); // sale being paid
   const [payAmt,setPayAmt]       = useState("");
   const [delSale,setDelSale]     = useState(null); // sale pending deletion
-  const E = {type:"OTC",customer:"",date:now(),items:[],notes:"",paymentMethod:"Cash",amountPaid:"",isPartPayment:false};
+  const E = {type:"OTC",customer:"",date:now(),items:[],notes:"",paymentMethod:"Cash",amountPaid:"",isPartPayment:false,discount:"",serviceCharge:""};
   const [form,setForm]           = useState(E);
-  const [cart,setCart]           = useState({drugId:"",qty:1});
+  const [cart,setCart]           = useState({drugId:"",qty:1,customPrice:""});
   const selDrug = data.inventory.find(d=>d.id===cart.drugId);
-  const total   = form.items.reduce((a,i)=>a+i.subtotal,0);
+  const subtotal     = form.items.reduce((a,i)=>a+i.subtotal,0);
+  const discountAmt  = form.discount ? (+form.discount||0) : 0;
+  const serviceAmt   = form.serviceCharge ? (+form.serviceCharge||0) : 0;
+  const total        = Math.max(0, subtotal - discountAmt + serviceAmt);
   const balance = total - (+form.amountPaid||total);
 
   // All customers — registered + walk-in buyers, searchable by name or phone
@@ -1272,14 +1298,15 @@ function Sales({data, session, save, addLog, showToast, role}){
     const drug = data.inventory.find(d=>d.id===cart.drugId);
     if(!drug) return;
     if(+cart.qty>drug.qty) return showToast("Insufficient stock","error");
+    const usePrice = cart.customPrice&&+cart.customPrice>0 ? +cart.customPrice : drug.sellingPrice;
     const ex = form.items.findIndex(i=>i.drugId===cart.drugId);
     if(ex>-1){
       const items=[...form.items]; items[ex].qty+=+cart.qty; items[ex].subtotal=items[ex].qty*items[ex].price;
       setForm({...form,items});
     } else {
-      setForm({...form,items:[...form.items,{drugId:drug.id,name:drug.name,price:drug.sellingPrice,qty:+cart.qty,subtotal:drug.sellingPrice*+cart.qty}]});
+      setForm({...form,items:[...form.items,{drugId:drug.id,name:drug.name,price:usePrice,originalPrice:drug.sellingPrice,qty:+cart.qty,subtotal:usePrice*+cart.qty,priceEdited:cart.customPrice&&+cart.customPrice>0&&+cart.customPrice!==drug.sellingPrice}]});
     }
-    setCart({drugId:"",qty:1});
+    setCart({drugId:"",qty:1,customPrice:""});
   };
 
   const doSale = () => {
@@ -1290,6 +1317,7 @@ function Sales({data, session, save, addLog, showToast, role}){
     const balOwed = form.isPartPayment ? total - amtPaid : 0;
     const sale = {
       id:uid(), ...form, total,
+      subtotal, discount: discountAmt, serviceCharge: serviceAmt,
       amountPaid: amtPaid, balanceOwed: balOwed, isPartPayment: form.isPartPayment,
       paymentMethod: form.paymentMethod,
       recordedBy:session.name, recordedById:session.id, timestamp:Date.now()
@@ -1588,23 +1616,61 @@ function Sales({data, session, save, addLog, showToast, role}){
                 <input className="inp" type="number" min={1} value={cart.qty} onChange={e=>setCart({...cart,qty:+e.target.value})} style={{width:70}}/>
                 <button className="btn bp" onClick={addCart}>Add</button>
               </div>
-              {selDrug&&<div style={{fontSize:11,color:"#38bdf8",marginTop:6}}>Unit price: {fmt(selDrug.sellingPrice)} · Subtotal: {fmt(selDrug.sellingPrice*cart.qty)}</div>}
+              {selDrug&&(
+                <div style={{marginTop:8}}>
+                  <div style={{fontSize:11,color:"#475569",marginBottom:4}}>
+                    Standard price: {fmt(selDrug.sellingPrice)} · Subtotal: {fmt((cart.customPrice&&+cart.customPrice>0?+cart.customPrice:selDrug.sellingPrice)*cart.qty)}
+                  </div>
+                  <div style={{display:"flex",alignItems:"center",gap:8}}>
+                    <span style={{fontSize:11,color:"#475569",flexShrink:0}}>Override price (optional):</span>
+                    <input className="inp" type="number" min={0} placeholder={`₦${selDrug.sellingPrice}`}
+                      value={cart.customPrice} onChange={e=>setCart({...cart,customPrice:e.target.value})}
+                      style={{width:130,fontSize:12}}/>
+                    {cart.customPrice&&+cart.customPrice!==selDrug.sellingPrice&&+cart.customPrice>0&&
+                      <span style={{fontSize:10,color:"#fb923c",fontWeight:700}}>⚡ Price edited</span>}
+                  </div>
+                </div>
+              )}
             </div>
 
             {form.items.length>0&&(
               <div style={{marginBottom:12}}>
                 {form.items.map((item,i)=>(
                   <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0",borderBottom:"1px solid #1e2d45"}}>
-                    <span style={{fontSize:13,color:"#e2e8f0"}}>{item.name} × {item.qty}</span>
+                    <div>
+                      <div style={{fontSize:13,color:"#e2e8f0"}}>{item.name} × {item.qty}</div>
+                      {item.priceEdited&&<div style={{fontSize:10,color:"#fb923c"}}>⚡ Price edited: {fmt(item.originalPrice)} → {fmt(item.price)}</div>}
+                    </div>
                     <div style={{display:"flex",alignItems:"center",gap:10}}>
                       <span style={{color:"#4ade80",fontWeight:700}}>{fmt(item.subtotal)}</span>
                       <button className="btn bd" style={{padding:"3px 7px"}} onClick={()=>setForm({...form,items:form.items.filter((_,j)=>j!==i)})}><Ic d={I.trash} size={11}/></button>
                     </div>
                   </div>
                 ))}
-                <div style={{textAlign:"right",marginTop:8,fontSize:17,fontWeight:800,color:"#4ade80"}}>Total: {fmt(total)}</div>
+                <div style={{marginTop:8,borderTop:"1px solid #1e2d45",paddingTop:8}}>
+                  <div style={{textAlign:"right",fontSize:13,color:"#64748b",marginBottom:3}}>Subtotal: {fmt(subtotal)}</div>
+                  {discountAmt>0&&<div style={{textAlign:"right",fontSize:13,color:"#fb923c",marginBottom:3}}>Discount: -{fmt(discountAmt)}</div>}
+                  {serviceAmt>0&&<div style={{textAlign:"right",fontSize:13,color:"#38bdf8",marginBottom:3}}>Service Charge: +{fmt(serviceAmt)}</div>}
+                  <div style={{textAlign:"right",fontSize:17,fontWeight:800,color:"#4ade80"}}>Total: {fmt(total)}</div>
+                </div>
               </div>
             )}
+
+            {/* Discount and Service Charge */}
+            <div className="fr" style={{marginBottom:12}}>
+              <div className="fg" style={{marginBottom:0}}>
+                <label>Discount (₦)</label>
+                <input className="inp" type="number" min={0} placeholder="₦0 — no discount"
+                  value={form.discount} onChange={e=>setForm({...form,discount:e.target.value})}/>
+                {form.discount&&+form.discount>0&&<div style={{fontSize:10,color:"#fb923c",marginTop:3}}>Reducing total by {fmt(+form.discount)}</div>}
+              </div>
+              <div className="fg" style={{marginBottom:0}}>
+                <label>Service Charge (₦)</label>
+                <input className="inp" type="number" min={0} placeholder="₦0 — no charge"
+                  value={form.serviceCharge} onChange={e=>setForm({...form,serviceCharge:e.target.value})}/>
+                {form.serviceCharge&&+form.serviceCharge>0&&<div style={{fontSize:10,color:"#38bdf8",marginTop:3}}>Adding {fmt(+form.serviceCharge)} to total</div>}
+              </div>
+            </div>
 
             {/* Part Payment Toggle */}
             <div style={{background:"#0a1525",border:"1px solid #1e3a5f",borderRadius:10,padding:12,marginBottom:12}}>
