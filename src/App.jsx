@@ -81,13 +81,23 @@ const DB = {
   },
 
   async saveInventory(items) {
-    // Upsert all inventory items
+    // Upsert inventory items — only the ones passed in
     const rows = items.map(i => ({
       id: i.id, name: i.name, category: i.category, qty: i.qty,
       unit: i.unit, cost_price: i.costPrice||0, selling_price: i.sellingPrice||0,
       reorder_level: i.reorderLevel||0, expiry: i.expiry||"", supplier: i.supplier||"",
     }));
-    await supa("inventory?on_conflict=id", "POST", rows);
+    if(rows.length > 0) await supa("inventory?on_conflict=id", "POST", rows);
+  },
+
+  async saveInventoryItems(items) {
+    // Save ONLY specific inventory items (used after sales to avoid stale overwrites)
+    const rows = items.map(i => ({
+      id: i.id, name: i.name, category: i.category, qty: i.qty,
+      unit: i.unit, cost_price: i.costPrice||0, selling_price: i.sellingPrice||0,
+      reorder_level: i.reorderLevel||0, expiry: i.expiry||"", supplier: i.supplier||"",
+    }));
+    if(rows.length > 0) await supa("inventory?on_conflict=id", "POST", rows);
   },
 
   async deleteInventoryItem(id) {
@@ -363,6 +373,7 @@ export default function App() {
       catch(e) { console.error(`Save error [${label}]:`, e); }
     };
     if(ops.inventory)    await run(()=>DB.saveInventory(d.inventory),    "inventory");
+    if(ops.saleInventory) await run(()=>DB.saveInventoryItems(ops.saleInventory), "saleInventory");
     if(ops.delInvId)     await run(()=>DB.deleteInventoryItem(ops.delInvId), "delInv");
     if(ops.sale)         await run(()=>DB.saveSale(ops.sale),            "sale");
     if(ops.customers)    await run(()=>DB.saveCustomers(d.customers),    "customers");
@@ -1289,7 +1300,10 @@ function Sales({data, session, save, addLog, showToast, role}){
     });
     const [d2,entry] = addLog({...data,sales:[...data.sales,sale],inventory:newInv}, "SALE_RECORDED",
       `${fmt(total)} by ${session.name}${balOwed>0?" — Part payment, balance: "+fmt(balOwed):""}`, session);
-    save(d2,{inventory:true,sale:sale,auditEntry:entry});
+    // CRITICAL FIX: Only save the specific drugs whose qty changed
+    // Never send full inventory array after a sale — prevents stale data overwrites
+    const changedDrugs = newInv.filter(drug=>form.items.find(i=>i.drugId===drug.id));
+    save(d2,{saleInventory:changedDrugs,sale:sale,auditEntry:entry});
     setModal(false); setReceipt(sale); setForm(E);
     showToast(balOwed>0?`Sale recorded! Balance owed: ${fmt(balOwed)}`:"Sale recorded! Receipt ready to print.");
   };
@@ -1306,7 +1320,9 @@ function Sales({data, session, save, addLog, showToast, role}){
     });
     const [d2,entry] = addLog({...data,sales:newSales,inventory:newInv},
       "SALE_DELETED", `Sale deleted: ${fmt(sale.total)} — ${sale.customer||"Walk-in"} on ${sale.date}`, session);
-    save(d2,{inventory:true,auditEntry:entry});
+    // Only save the specific drugs whose stock was restored
+    const restoredDrugs = newInv.filter(drug=>sale.items.find(i=>i.drugId===drug.id));
+    save(d2,{saleInventory:restoredDrugs,auditEntry:entry});
     showToast("Sale deleted and stock restored");
     setDelSale(null);
   };
