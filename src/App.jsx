@@ -43,7 +43,7 @@ const DB = {
         supa("inventory?select=*&order=name.asc"),
         supa("sales?select=*&order=timestamp.desc"),
         supa("customers?select=*&order=name.asc"),
-        supa("audit_log?select=*&order=timestamp.desc&limit=1000"),
+        supa("audit_log?select=*&order=timestamp.desc"),
         supa("settings?select=*"),
         supa("invoices?select=*&order=date.desc"),
       ]);
@@ -418,7 +418,7 @@ export default function App() {
 
   const addLog = useCallback((d, action, detail, user)=>{
     const entry = {id:uid(), action, detail, user:user?.name||"System", role:user?.role||"system", timestamp:ts()};
-    return [{...d, auditLog:[entry,...(d.auditLog||[])].slice(0,1000)}, entry];
+    return [{...d, auditLog:[entry,...(d.auditLog||[])]}, entry];
   },[]);
 
   const showToast = (msg, type="success") => {
@@ -2619,7 +2619,7 @@ function AuditLog({data}){
   const fetchLogs = async() => {
     setLoading(true);
     try {
-      const rows = await supa("audit_log?select=*&order=timestamp.desc&limit=1000");
+      const rows = await supa("audit_log?select=*&order=timestamp.desc");
       if(Array.isArray(rows) && rows.length > 0) setLogs(rows);
     } catch(e) { console.error("Audit log fetch error:", e); }
     setLoading(false);
@@ -2670,7 +2670,7 @@ function AuditLog({data}){
         </table>
       </div>
       <div style={{marginTop:8,fontSize:11,color:"#334155",textAlign:"center"}}>
-        Showing {filtered.length} of {logs.length} total entries — click Refresh to get latest
+        Showing {filtered.length} of {logs.length} total entries — complete history from Supabase
       </div>
     </div>
   );
