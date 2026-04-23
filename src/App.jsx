@@ -1283,7 +1283,7 @@ function Sales({data, session, save, addLog, showToast, role}){
   const [salesPage,setSalesPage] = useState(1);
   const [isSaving,setIsSaving]   = useState(false);
   const SALES_PER_PAGE = 50;
-  const pendingSaleId = React.useRef(null); // Stable ID for current sale — prevents duplicates on retry
+  const pendingSaleId = useRef(null); // Stable ID for current sale — prevents duplicates on retry
   const E = {type:"OTC",customer:"",date:now(),items:[],notes:"",paymentMethod:"Cash",amountPaid:"",isPartPayment:false,discount:"",serviceCharge:""};
   const [form,setForm]           = useState(E);
   const [cart,setCart]           = useState({drugId:"",qty:1,customPrice:""});
