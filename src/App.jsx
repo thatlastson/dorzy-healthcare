@@ -404,13 +404,14 @@ export default function App() {
       return false;
     }
     // P15/P16: After successful save, reload from Supabase to confirm DB and app are in sync
-    // This catches any silent discrepancies between what we sent and what DB stored
-    try {
-      const confirmed = await DB.load();
-      if(confirmed) setData(confirmed);
-    } catch(e) {
-      // Load failed after save — not critical, optimistic update stands
-      console.warn("Post-save reload failed — using optimistic state:", e);
+    // Skip reload for delete operations — the deleted item must not be restored by reload
+    if(!ops.skipReload) {
+      try {
+        const confirmed = await DB.load();
+        if(confirmed) setData(confirmed);
+      } catch(e) {
+        console.warn("Post-save reload failed — using optimistic state:", e);
+      }
     }
     return true;
   },[]);
@@ -1280,7 +1281,9 @@ function Sales({data, session, save, addLog, showToast, role}){
   const [payAmt,setPayAmt]       = useState("");
   const [delSale,setDelSale]     = useState(null); // sale pending deletion
   const [salesPage,setSalesPage] = useState(1);
+  const [isSaving,setIsSaving]   = useState(false);
   const SALES_PER_PAGE = 50;
+  const pendingSaleId = React.useRef(null); // Stable ID for current sale — prevents duplicates on retry
   const E = {type:"OTC",customer:"",date:now(),items:[],notes:"",paymentMethod:"Cash",amountPaid:"",isPartPayment:false,discount:"",serviceCharge:""};
   const [form,setForm]           = useState(E);
   const [cart,setCart]           = useState({drugId:"",qty:1,customPrice:""});
@@ -1328,13 +1331,16 @@ function Sales({data, session, save, addLog, showToast, role}){
   };
 
   const doSale = async() => {
+    if(isSaving) return; // Prevent double submission
     if(form.items.length===0) return showToast("Add at least one item","error");
     const amtPaid = form.isPartPayment ? (+form.amountPaid||0) : total;
     if(form.isPartPayment && amtPaid<0) return showToast("Amount paid cannot be negative","error");
     if(form.isPartPayment && amtPaid>=total) return showToast("Amount paid equals or exceeds total — use Full Payment instead","error");
     const balOwed = form.isPartPayment ? total - amtPaid : 0;
+    // Use stable pendingSaleId — same ID on retry, upsert prevents duplication
+    const saleId = pendingSaleId.current || uid();
     const sale = {
-      id:uid(), ...form, total,
+      id:saleId, ...form, total,
       subtotal, discount: discountAmt, serviceCharge: serviceAmt,
       amountPaid: amtPaid, balanceOwed: balOwed, isPartPayment: form.isPartPayment,
       paymentMethod: form.paymentMethod,
@@ -1348,11 +1354,15 @@ function Sales({data, session, save, addLog, showToast, role}){
       `${fmt(total)} by ${session.name}${balOwed>0?" — Part payment, balance: "+fmt(balOwed):""}`, session);
     // CRITICAL FIX: Only save the specific drugs whose qty changed
     const changedDrugs = newInv.filter(drug=>form.items.find(i=>i.drugId===drug.id));
+    setIsSaving(true);
     const ok = await save(d2,{saleInventory:changedDrugs,sale:sale,auditEntry:entry}, data);
+    setIsSaving(false);
     if(ok!==false){
       setModal(false); setReceipt(sale); setForm(E);
+      pendingSaleId.current = null; // Clear stable ID after success
       showToast(balOwed>0?`Sale recorded! Balance owed: ${fmt(balOwed)}`:"Sale recorded! Receipt ready to print.");
     }
+    // On failure: pendingSaleId.current is kept — retry will reuse same ID, no duplicate
   };
 
   const openPay = (sale) => { setPayModal(sale); setPayAmt(""); };
@@ -1369,9 +1379,11 @@ function Sales({data, session, save, addLog, showToast, role}){
       "SALE_DELETED", `Sale deleted: ${fmt(sale.total)} — ${sale.customer||"Walk-in"} on ${sale.date}`, session);
     // Only save the specific drugs whose stock was restored
     const restoredDrugs = newInv.filter(drug=>sale.items.find(i=>i.drugId===drug.id));
-    save(d2,{saleInventory:restoredDrugs,auditEntry:entry});
-    showToast("Sale deleted and stock restored");
-    setDelSale(null);
+    const delOk = await save(d2,{saleInventory:restoredDrugs,auditEntry:entry,skipReload:true}, data);
+    if(delOk!==false){
+      showToast("Sale deleted and stock restored");
+      setDelSale(null);
+    }
   };
 
   const applyPayment = async(payAll) => {
@@ -1406,7 +1418,7 @@ function Sales({data, session, save, addLog, showToast, role}){
           ))}
         </div>
         <input className="inp" style={{maxWidth:240}} placeholder="Search sales, customer, drug..." value={search} onChange={e=>{setSearch(e.target.value);resetPage();}}/>
-        <button className="btn bs" style={{marginLeft:"auto"}} onClick={()=>setModal(true)}><Ic d={I.plus} size={13}/> New Sale</button>
+        <button className="btn bs" style={{marginLeft:"auto"}} onClick={()=>{pendingSaleId.current=uid();setModal(true);}}><Ic d={I.plus} size={13}/> New Sale</button>
       </div>
 
       {/* SALES TAB */}
@@ -1751,7 +1763,9 @@ function Sales({data, session, save, addLog, showToast, role}){
             </div>
             <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
               <button className="btn bg" onClick={()=>setModal(false)}>Cancel</button>
-              <button className="btn bs" onClick={doSale}><Ic d={I.check} size={13}/> Complete Sale & Print Receipt</button>
+              <button className="btn bs" onClick={doSale} disabled={isSaving} style={{opacity:isSaving?0.6:1}}>
+                {isSaving?<><Ic d={I.check} size={13}/> Saving...</>:<><Ic d={I.check} size={13}/> Complete Sale & Print Receipt</>}
+              </button>
             </div>
           </div>
         </div>
