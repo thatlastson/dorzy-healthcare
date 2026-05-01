@@ -1287,6 +1287,7 @@ function Sales({data, session, save, addLog, showToast, role}){
   const E = {type:"OTC",customer:"",date:now(),items:[],notes:"",paymentMethod:"Cash",amountPaid:"",isPartPayment:false,discount:"",serviceCharge:""};
   const [form,setForm]           = useState(E);
   const [cart,setCart]           = useState({drugId:"",qty:1,customPrice:""});
+  const [drugSearch,setDrugSearch] = useState("");
   const selDrug = data.inventory.find(d=>d.id===cart.drugId);
   const subtotal     = form.items.reduce((a,i)=>a+i.subtotal,0);
   const discountAmt  = form.discount ? (+form.discount||0) : 0;
@@ -1360,6 +1361,7 @@ function Sales({data, session, save, addLog, showToast, role}){
     if(ok!==false){
       setModal(false); setReceipt(sale); setForm(E);
       pendingSaleId.current = null; // Clear stable ID after success
+      setDrugSearch(""); // Clear drug search
       showToast(balOwed>0?`Sale recorded! Balance owed: ${fmt(balOwed)}`:"Sale recorded! Receipt ready to print.");
     }
     // On failure: pendingSaleId.current is kept — retry will reuse same ID, no duplicate
@@ -1602,7 +1604,7 @@ function Sales({data, session, save, addLog, showToast, role}){
           <div className="md" style={{width:580}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
               <h3 style={{fontFamily:"Syne,sans-serif",fontSize:16,fontWeight:800,color:"#f1f5f9"}}>Record New Sale</h3>
-              <button className="btn bg" style={{padding:"4px 7px"}} onClick={()=>setModal(false)}><Ic d={I.x} size={13}/></button>
+              <button className="btn bg" style={{padding:"4px 7px"}} onClick={()=>{setModal(false);setDrugSearch("");}}><Ic d={I.x} size={13}/></button>
             </div>
             <div style={{fontSize:12,background:"#0a1525",borderRadius:8,padding:"7px 12px",marginBottom:12,color:"#475569"}}>
               Recording as: <strong style={{color:"#a78bfa"}}>{session.name}</strong>
@@ -1657,19 +1659,49 @@ function Sales({data, session, save, addLog, showToast, role}){
             {/* Cart */}
             <div style={{background:"#0a1525",border:"1px solid #1e3a5f",borderRadius:10,padding:14,marginBottom:12}}>
               <div style={{fontSize:11,fontWeight:700,color:"#475569",marginBottom:10,textTransform:"uppercase",letterSpacing:".05em"}}>Add to Cart</div>
-              <div style={{display:"flex",gap:8}}>
-                <div style={{flex:2}}>
-                  <select className="inp" value={cart.drugId} onChange={e=>setCart({...cart,drugId:e.target.value})}>
-                    <option value="">Select drug...</option>
-                    {data.inventory.filter(d=>days(d.expiry)>0||d.qty>0).sort((a,b)=>b.qty-a.qty).map(d=>(
-                      <option key={d.id} value={d.id} disabled={d.qty<=0}>
-                        {d.qty<=0?`${d.name} — OUT OF STOCK`:d.qty<=d.reorderLevel?`${d.name} — Low: ${d.qty} ${d.unit}`:`${d.name} — Stock: ${d.qty} ${d.unit}`}
-                      </option>
-                    ))}
-                  </select>
+              {/* Drug search */}
+              <div style={{marginBottom:8}}>
+                <input className="inp" placeholder="🔍 Search drug by name..." value={drugSearch}
+                  onChange={e=>{setDrugSearch(e.target.value); setCart({...cart,drugId:"",customPrice:""}); }}
+                  autoComplete="off"/>
+              </div>
+              {/* Filtered drug list */}
+              {drugSearch.length>0&&(
+                <div style={{maxHeight:180,overflowY:"auto",background:"#07101f",border:"1px solid #1e3a5f",borderRadius:8,marginBottom:8}}>
+                  {data.inventory
+                    .filter(d=>(days(d.expiry)>0||d.qty>0)&&d.name.toLowerCase().includes(drugSearch.toLowerCase()))
+                    .sort((a,b)=>b.qty-a.qty)
+                    .slice(0,20)
+                    .map(d=>(
+                      <div key={d.id}
+                        onClick={()=>{ setCart({...cart,drugId:d.id,customPrice:""}); setDrugSearch(d.name); }}
+                        style={{
+                          padding:"8px 12px",cursor:d.qty<=0?"not-allowed":"pointer",
+                          borderBottom:"1px solid #1e2d45",
+                          background:cart.drugId===d.id?"#0d1f3c":"transparent",
+                          opacity:d.qty<=0?0.5:1,
+                          display:"flex",justifyContent:"space-between",alignItems:"center"
+                        }}>
+                        <div>
+                          <div style={{fontSize:13,color:"#f1f5f9",fontWeight:600}}>{d.name}</div>
+                          <div style={{fontSize:11,color:"#475569"}}>{d.category} · {fmt(d.sellingPrice)}</div>
+                        </div>
+                        <div style={{textAlign:"right"}}>
+                          <div style={{fontSize:12,fontWeight:700,color:d.qty<=0?"#f87171":d.qty<=d.reorderLevel?"#fb923c":"#4ade80"}}>
+                            {d.qty<=0?"OUT OF STOCK":`${d.qty} ${d.unit}`}
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  }
+                  {data.inventory.filter(d=>(days(d.expiry)>0||d.qty>0)&&d.name.toLowerCase().includes(drugSearch.toLowerCase())).length===0&&(
+                    <div style={{padding:12,color:"#475569",fontSize:12,textAlign:"center"}}>No drugs found matching "{drugSearch}"</div>
+                  )}
                 </div>
-                <input className="inp" type="number" min={1} value={cart.qty} onChange={e=>setCart({...cart,qty:+e.target.value})} style={{width:70}}/>
-                <button className="btn bp" onClick={addCart}>Add</button>
+              )}
+              <div style={{display:"flex",gap:8}}>
+                <input className="inp" type="number" min={1} value={cart.qty} onChange={e=>setCart({...cart,qty:+e.target.value})} style={{width:70}} placeholder="Qty"/>
+                <button className="btn bp" onClick={addCart} disabled={!cart.drugId}>Add to Cart</button>
               </div>
               {selDrug&&(
                 <div style={{marginTop:8}}>
@@ -1963,13 +1995,18 @@ function Records({data, session, save, addLog, showToast}){
 // ═══════════════════════════════════════════════════════════════════
 function PurchaseInvoice({data, session, save, addLog, showToast}){
   const invoices = data.invoices||[];
-  const [modal,setModal]       = useState(false);
-  const [viewModal,setView]    = useState(null);
-  const [confirmDel,setConfirm]= useState(null);
-  const [search,setSearch]     = useState("");
+  const [modal,setModal]         = useState(false);
+  const [viewModal,setView]      = useState(null);
+  const [confirmDel,setConfirm]  = useState(null);
+  const [search,setSearch]       = useState("");
+  const [editingId,setEditingId] = useState(null); // invoice being updated
+  const [supplierSearch,setSupSearch] = useState("");
   const E = {supplier:"",address:"",phone:"",date:now(),items:[],notes:""};
-  const [form,setForm]         = useState(E);
-  const [itemRow,setItemRow]   = useState({name:"",qty:"",unit:"",unitCost:"",totalCost:"",expiry:""});
+  const [form,setForm]           = useState(E);
+  const [itemRow,setItemRow]     = useState({name:"",qty:"",unit:"",unitCost:"",totalCost:"",expiry:""});
+
+  // All unique suppliers from existing invoices
+  const knownSuppliers = [...new Set(invoices.map(i=>i.supplier))].filter(Boolean).sort();
 
   const filtered = invoices.filter(inv=>
     inv.supplier.toLowerCase().includes(search.toLowerCase())||
@@ -1977,7 +2014,41 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
   );
 
   const totalPurchases = invoices.reduce((a,i)=>a+i.total,0);
-  const uniqueSuppliers = [...new Set(invoices.map(i=>i.supplier))].length;
+  const uniqueSuppliers = knownSuppliers.length;
+
+  // When supplier is selected from suggestions, pre-fill address and phone
+  const selectSupplier = (supplierName) => {
+    const lastInvoice = [...invoices].filter(i=>i.supplier===supplierName).sort((a,b)=>b.timestamp-a.timestamp)[0];
+    setForm({...form,
+      supplier: supplierName,
+      address: lastInvoice?.address||form.address,
+      phone: lastInvoice?.phone||form.phone,
+    });
+    setSupSearch(supplierName);
+  };
+
+  // Open modal to ADD NEW invoice (fresh)
+  const openNew = () => {
+    setEditingId(null);
+    setForm(E);
+    setSupSearch("");
+    setModal(true);
+  };
+
+  // Open modal to UPDATE existing supplier — pre-fill their details
+  const openUpdate = (inv) => {
+    setEditingId(inv.id);
+    setForm({
+      supplier: inv.supplier,
+      address: inv.address||"",
+      phone: inv.phone||"",
+      date: now(),
+      items: [],
+      notes: "",
+    });
+    setSupSearch(inv.supplier);
+    setModal(true);
+  };
 
   const addItem = () => {
     if(!itemRow.name||!itemRow.qty) return showToast("Item name and quantity required","error");
@@ -1990,12 +2061,16 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
     if(!form.supplier) return showToast("Supplier name is required","error");
     if(form.items.length===0) return showToast("Add at least one item","error");
     const total = form.items.reduce((a,i)=>a+i.totalCost,0);
+    // Always create a new invoice entry — each delivery is a separate record
     const invoice = {id:uid(),...form,total,recordedBy:session.name,timestamp:Date.now()};
     const newInvoices = [...invoices, invoice];
-    const [d2,entry] = addLog({...data,invoices:newInvoices},"INVOICE_ADDED",`Purchase invoice from ${form.supplier} — ${fmt(total)}`,session);
-    save(d2,{invoice,auditEntry:entry});
-    showToast("Invoice saved successfully");
-    setModal(false); setForm(E);
+    const [d2,entry] = addLog({...data,invoices:newInvoices},"INVOICE_ADDED",
+      `New delivery from ${form.supplier} — ${fmt(total)}`,session);
+    const ok = await save(d2,{invoice,auditEntry:entry});
+    if(ok!==false){
+      showToast(`Delivery from ${form.supplier} saved successfully`);
+      setModal(false); setForm(E); setSupSearch(""); setEditingId(null);
+    }
   };
 
   const handleDel = async() => {
@@ -2084,7 +2159,7 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
       {/* Search and Add */}
       <div style={{display:"flex",gap:10,marginBottom:14,alignItems:"center"}}>
         <input className="inp" style={{maxWidth:280}} placeholder="Search by supplier or date..." value={search} onChange={e=>setSearch(e.target.value)}/>
-        <button className="btn bs" style={{marginLeft:"auto"}} onClick={()=>{setForm(E);setModal(true)}}><Ic d={I.plus} size={13}/> New Invoice</button>
+        <button className="btn bs" style={{marginLeft:"auto"}} onClick={openNew}><Ic d={I.plus} size={13}/> New Invoice</button>
       </div>
 
       {/* Invoice List */}
@@ -2104,6 +2179,7 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
                   <td style={{color:"#a78bfa",fontSize:12}}>{inv.recordedBy||"—"}</td>
                   <td style={{display:"flex",gap:5}}>
                     <button className="btn bp" style={{padding:"4px 9px",fontSize:11}} onClick={()=>setView(inv)}>👁 View</button>
+                    <button className="btn bg" style={{padding:"4px 9px",fontSize:11}} onClick={()=>openUpdate(inv)}>+ Update</button>
                     <button className="btn bd" style={{padding:"4px 9px",fontSize:11}} onClick={()=>setConfirm(inv)}><Ic d={I.trash} size={12}/></button>
                   </td>
                 </tr>
@@ -2118,11 +2194,33 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
         <div className="mo" onClick={e=>e.target===e.currentTarget&&setModal(false)}>
           <div className="md" style={{width:580,maxHeight:"90vh",overflowY:"auto"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
-              <h3 style={{fontFamily:"Syne,sans-serif",fontSize:16,fontWeight:800,color:"#f1f5f9"}}>New Purchase Invoice</h3>
-              <button className="btn bg" style={{padding:"4px 7px"}} onClick={()=>setModal(false)}><Ic d={I.x} size={13}/></button>
+              <h3 style={{fontFamily:"Syne,sans-serif",fontSize:16,fontWeight:800,color:"#f1f5f9"}}>
+              {editingId?"➕ New Delivery — "+form.supplier:"📦 New Purchase Invoice"}
+            </h3>
+              <button className="btn bg" style={{padding:"4px 7px"}} onClick={()=>{setModal(false);setSupSearch("");setEditingId(null);}}><Ic d={I.x} size={13}/></button>
             </div>
             <div className="fr">
-              <div className="fg"><label>Supplier / Dealer Name *</label><input className="inp" placeholder="e.g. PharmaCo Ltd" value={form.supplier} onChange={e=>setForm({...form,supplier:e.target.value})}/></div>
+              <div className="fg">
+                <label>Supplier / Dealer Name *</label>
+                <input className="inp" placeholder="Type to search or add new supplier..."
+                  value={supplierSearch}
+                  onChange={e=>{setSupSearch(e.target.value);setForm({...form,supplier:e.target.value});}}/>
+                {supplierSearch.length>0&&knownSuppliers.filter(s=>s.toLowerCase().includes(supplierSearch.toLowerCase())&&s!==supplierSearch).length>0&&(
+                  <div style={{background:"#07101f",border:"1px solid #1e3a5f",borderRadius:8,maxHeight:140,overflowY:"auto",marginTop:4}}>
+                    {knownSuppliers.filter(s=>s.toLowerCase().includes(supplierSearch.toLowerCase())).map(s=>(
+                      <div key={s} onClick={()=>selectSupplier(s)}
+                        style={{padding:"8px 12px",cursor:"pointer",fontSize:13,color:"#f1f5f9",borderBottom:"1px solid #1e2d45"}}
+                        onMouseEnter={e=>e.target.style.background="#0d1f3c"}
+                        onMouseLeave={e=>e.target.style.background="transparent"}>
+                        {s}
+                        <span style={{fontSize:10,color:"#475569",marginLeft:8}}>
+                          {invoices.filter(i=>i.supplier===s).length} previous invoice(s)
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
               <div className="fg"><label>Date *</label><input className="inp" type="date" value={form.date} onChange={e=>setForm({...form,date:e.target.value})}/></div>
             </div>
             <div className="fr">
@@ -2174,7 +2272,7 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
 
             <div className="fg"><label>Notes</label><textarea className="inp" rows={2} placeholder="Optional notes..." value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})}/></div>
             <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
-              <button className="btn bg" onClick={()=>setModal(false)}>Cancel</button>
+              <button className="btn bg" onClick={()=>{setModal(false);setSupSearch("");setEditingId(null);}}> Cancel</button>
               <button className="btn bs" onClick={handleSave}><Ic d={I.check} size={13}/> Save Invoice</button>
             </div>
           </div>
