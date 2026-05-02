@@ -62,7 +62,7 @@ const DB = {
         email:        rawSettings.email||"",
       } : SEED.settings;
       // Never fall back to SEED inside load — return exactly what DB has
-      const mapInvoice = i => ({...i, recordedBy: i.recorded_by, items: i.items||[]});
+      const mapInvoice = i => ({...i, recordedBy: i.recorded_by, items: i.items||[], expiry: i.expiry||''});
       return {
         users:     Array.isArray(users)     ? users.map(mapUser)       : [],
         inventory: Array.isArray(inventory) ? inventory.map(mapInv)    : [],
@@ -1993,93 +1993,100 @@ function Records({data, session, save, addLog, showToast}){
 // ═══════════════════════════════════════════════════════════════════
 //  PURCHASE INVOICE
 // ═══════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
+//  PURCHASE INVOICE — Supplier Directory with History
+// ═══════════════════════════════════════════════════════════════════
 function PurchaseInvoice({data, session, save, addLog, showToast}){
   const invoices = data.invoices||[];
   const [modal,setModal]         = useState(false);
-  const [viewModal,setView]      = useState(null);
+  const [histModal,setHist]      = useState(null); // supplier name for history
   const [confirmDel,setConfirm]  = useState(null);
+  const [editing,setEditing]     = useState(null); // invoice id being edited
   const [search,setSearch]       = useState("");
-  const [editingId,setEditingId] = useState(null); // invoice being updated
-  const [supplierSearch,setSupSearch] = useState("");
-  const E = {supplier:"",address:"",phone:"",date:now(),items:[],notes:""};
+  const [supInput,setSupInput]   = useState("");
+  const E = {supplier:"",address:"",phone:"",email:"",notes:"",expiry:"",date:now()};
   const [form,setForm]           = useState(E);
-  const [itemRow,setItemRow]     = useState({name:"",qty:"",unit:"",unitCost:"",totalCost:"",expiry:""});
 
-  // All unique suppliers from existing invoices
-  const knownSuppliers = [...new Set(invoices.map(i=>i.supplier))].filter(Boolean).sort();
+  // All unique suppliers — most recent first
+  const allSuppliers = [...new Map(
+    [...invoices].sort((a,b)=>b.timestamp-a.timestamp)
+    .map(i=>[i.supplier, i])
+  ).values()];
 
-  const filtered = invoices.filter(inv=>
+  // Suppliers matching search
+  const filtered = allSuppliers.filter(inv=>
     inv.supplier.toLowerCase().includes(search.toLowerCase())||
-    inv.date.includes(search)
+    (inv.phone||"").includes(search)||
+    (inv.address||"").toLowerCase().includes(search.toLowerCase())
   );
 
-  const totalPurchases = invoices.reduce((a,i)=>a+i.total,0);
-  const uniqueSuppliers = knownSuppliers.length;
+  // Get full history for a supplier
+  const getHistory = (name) => [...invoices]
+    .filter(i=>i.supplier===name)
+    .sort((a,b)=>b.timestamp-a.timestamp);
 
-  // When supplier is selected from suggestions, pre-fill address and phone
-  const selectSupplier = (supplierName) => {
-    const lastInvoice = [...invoices].filter(i=>i.supplier===supplierName).sort((a,b)=>b.timestamp-a.timestamp)[0];
-    setForm({...form,
-      supplier: supplierName,
-      address: lastInvoice?.address||form.address,
-      phone: lastInvoice?.phone||form.phone,
+  // Supplier suggestions while typing
+  const suggestions = supInput.length>0
+    ? allSuppliers.filter(s=>s.supplier.toLowerCase().includes(supInput.toLowerCase())&&s.supplier!==supInput)
+    : [];
+
+  // Select supplier from suggestion — pre-fill details
+  const pickSupplier = (inv) => {
+    setForm({...E,
+      supplier:inv.supplier, address:inv.address||"",
+      phone:inv.phone||"", email:inv.email||"",
+      notes:inv.notes||"", expiry:inv.expiry||"", date:now()
     });
-    setSupSearch(supplierName);
+    setSupInput(inv.supplier);
   };
 
-  // Open modal to ADD NEW invoice (fresh)
   const openNew = () => {
-    setEditingId(null);
-    setForm(E);
-    setSupSearch("");
-    setModal(true);
+    setEditing(null); setForm(E); setSupInput(""); setModal(true);
   };
 
-  // Open modal to UPDATE existing supplier — pre-fill their details
-  const openUpdate = (inv) => {
-    setEditingId(inv.id);
+  const openEdit = (inv) => {
+    setEditing(inv.id);
     setForm({
-      supplier: inv.supplier,
-      address: inv.address||"",
-      phone: inv.phone||"",
-      date: now(),
-      items: [],
-      notes: "",
+      supplier:inv.supplier, address:inv.address||"",
+      phone:inv.phone||"", email:inv.email||"",
+      notes:inv.notes||"", expiry:inv.expiry||"", date:inv.date||now()
     });
-    setSupSearch(inv.supplier);
+    setSupInput(inv.supplier);
     setModal(true);
-  };
-
-  const addItem = () => {
-    if(!itemRow.name||!itemRow.qty) return showToast("Item name and quantity required","error");
-    const total = +itemRow.qty * (+itemRow.unitCost||0);
-    setForm({...form, items:[...form.items,{...itemRow,qty:+itemRow.qty,unitCost:+itemRow.unitCost||0,totalCost:total}]});
-    setItemRow({name:"",qty:"",unit:"",unitCost:"",totalCost:"",expiry:""});
   };
 
   const handleSave = async() => {
     if(!form.supplier) return showToast("Supplier name is required","error");
-    if(form.items.length===0) return showToast("Add at least one item","error");
-    const total = form.items.reduce((a,i)=>a+i.totalCost,0);
-    // Always create a new invoice entry — each delivery is a separate record
-    const invoice = {id:uid(),...form,total,recordedBy:session.name,timestamp:Date.now()};
-    const newInvoices = [...invoices, invoice];
-    const [d2,entry] = addLog({...data,invoices:newInvoices},"INVOICE_ADDED",
-      `New delivery from ${form.supplier} — ${fmt(total)}`,session);
-    const ok = await save(d2,{invoice,auditEntry:entry});
+    let newInvoices;
+    let action, detail;
+    if(editing) {
+      // Update existing invoice
+      newInvoices = invoices.map(i=>i.id===editing?{...i,...form,id:editing}:i);
+      action = "INVOICE_UPDATED"; detail = `Updated: ${form.supplier}`;
+    } else {
+      // Add new supplier/invoice
+      const invoice = {id:uid(),...form,recordedBy:session.name,timestamp:Date.now(),items:[]};
+      newInvoices = [...invoices, invoice];
+      action = "INVOICE_ADDED"; detail = `Added supplier: ${form.supplier}`;
+    }
+    const [d2,entry] = addLog({...data,invoices:newInvoices}, action, detail, session);
+    const ok = await save(d2,{invoice:editing?invoices.find(i=>i.id===editing):newInvoices[newInvoices.length-1],auditEntry:entry});
     if(ok!==false){
-      showToast(`Delivery from ${form.supplier} saved successfully`);
-      setModal(false); setForm(E); setSupSearch(""); setEditingId(null);
+      showToast(editing?"Supplier updated":"Supplier added successfully");
+      setModal(false); setForm(E); setSupInput(""); setEditing(null);
     }
   };
 
   const handleDel = async() => {
     const inv = confirmDel;
     const newInvoices = invoices.filter(i=>i.id!==inv.id);
-    const [d2,entry] = addLog({...data,invoices:newInvoices},"INVOICE_DELETED",`Invoice deleted: ${inv.supplier} — ${fmt(inv.total)}`,session);
-    save(d2,{delInvoiceId:inv.id,auditEntry:entry});
-    showToast("Invoice deleted"); setConfirm(null);
+    const [d2,entry] = addLog({...data,invoices:newInvoices},"INVOICE_DELETED",`Deleted: ${inv.supplier}`,session);
+    const ok = await save(d2,{delInvoiceId:inv.id,auditEntry:entry,skipReload:true});
+    if(ok!==false){ showToast("Supplier record deleted"); setConfirm(null); }
   };
+
+  const totalSuppliers = allSuppliers.length;
+  const totalInvoices  = invoices.length;
 
   return(
     <div>
@@ -2087,9 +2094,12 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
       {confirmDel&&(
         <div className="mo" onClick={e=>e.target===e.currentTarget&&setConfirm(null)}>
           <div style={{background:"#0d1528",border:"1px solid #7f1d1d",borderRadius:20,padding:28,width:420,maxWidth:"95vw",textAlign:"center"}}>
-            <div style={{fontSize:36,marginBottom:12}}>🗑️</div>
-            <div style={{fontFamily:"Syne,sans-serif",fontSize:15,fontWeight:800,color:"#f1f5f9",marginBottom:8}}>Delete Invoice?</div>
-            <div style={{fontSize:13,color:"#94a3b8",marginBottom:14}}>{confirmDel.supplier} — {confirmDel.date} — {fmt(confirmDel.total)}</div>
+            <div style={{fontSize:36,marginBottom:10}}>🗑️</div>
+            <div style={{fontFamily:"Syne,sans-serif",fontSize:15,fontWeight:800,color:"#f1f5f9",marginBottom:8}}>Delete Supplier Record?</div>
+            <div style={{fontSize:13,color:"#94a3b8",marginBottom:16}}>{confirmDel.supplier}</div>
+            <div style={{fontSize:11,color:"#f87171",background:"#1a0505",borderRadius:8,padding:"8px 12px",marginBottom:16}}>
+              ⚠️ This will remove this supplier entry permanently.
+            </div>
             <div style={{display:"flex",gap:10,justifyContent:"center"}}>
               <button className="btn bg" style={{padding:"9px 22px"}} onClick={()=>setConfirm(null)}>Cancel</button>
               <button className="btn bd" style={{padding:"9px 22px"}} onClick={handleDel}>Delete</button>
@@ -2098,45 +2108,111 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
         </div>
       )}
 
-      {/* View Invoice Modal */}
-      {viewModal&&(
-        <div className="mo" onClick={e=>e.target===e.currentTarget&&setView(null)}>
-          <div className="md" style={{width:560,maxHeight:"85vh",overflowY:"auto"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
-              <div>
-                <div style={{fontFamily:"Syne,sans-serif",fontSize:16,fontWeight:800,color:"#f1f5f9"}}>📦 Purchase Invoice</div>
-                <div style={{fontSize:11,color:"#475569"}}>#{viewModal.id.slice(-6).toUpperCase()}</div>
+      {/* Supplier History Modal */}
+      {histModal&&(()=>{
+        const history = getHistory(histModal);
+        const latest  = history[0];
+        return(
+          <div className="mo" onClick={e=>e.target===e.currentTarget&&setHist(null)}>
+            <div className="md" style={{width:560,maxHeight:"85vh",overflowY:"auto"}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+                <div>
+                  <div style={{fontFamily:"Syne,sans-serif",fontSize:16,fontWeight:800,color:"#f1f5f9"}}>📦 {histModal}</div>
+                  <div style={{fontSize:11,color:"#475569"}}>Supplier History — {history.length} record(s)</div>
+                </div>
+                <button className="btn bg" style={{padding:"4px 7px"}} onClick={()=>setHist(null)}><Ic d={I.x} size={13}/></button>
               </div>
-              <button className="btn bg" style={{padding:"4px 7px"}} onClick={()=>setView(null)}><Ic d={I.x} size={13}/></button>
-            </div>
-            <div style={{background:"#0a1525",borderRadius:10,padding:14,marginBottom:14}}>
-              {[["Supplier",viewModal.supplier],["Address",viewModal.address||"—"],["Phone",viewModal.phone||"—"],["Date",viewModal.date],["Recorded by",viewModal.recordedBy||"—"]].map(([l,v])=>(
-                <div key={l} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:"1px solid #1e2d45"}}>
-                  <span style={{fontSize:11,color:"#475569"}}>{l}</span>
-                  <span style={{fontSize:13,fontWeight:600,color:"#e2e8f0"}}>{v}</span>
+
+              {/* Supplier details */}
+              <div style={{background:"#0a1525",borderRadius:10,padding:14,marginBottom:14}}>
+                {[
+                  ["Supplier",latest?.supplier||"—"],
+                  ["Address", latest?.address||"—"],
+                  ["Phone",   latest?.phone||"—"],
+                  ["Email",   latest?.email||"—"],
+                  ["Expiry",  latest?.expiry||"—"],
+                  ["Notes",   latest?.notes||"—"],
+                ].map(([l,v])=>(
+                  <div key={l} style={{display:"flex",justifyContent:"space-between",padding:"5px 0",borderBottom:"1px solid #1e2d45"}}>
+                    <span style={{fontSize:11,color:"#475569"}}>{l}</span>
+                    <span style={{fontSize:13,fontWeight:600,color:"#e2e8f0"}}>{v}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* History entries */}
+              <div style={{fontWeight:700,color:"#f1f5f9",marginBottom:8,fontSize:13}}>All Entries</div>
+              {history.map((inv,i)=>(
+                <div key={inv.id} style={{background:"#0a1525",border:"1px solid #1e3a5f",borderRadius:10,padding:12,marginBottom:8}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <div>
+                      <div style={{fontSize:12,fontWeight:700,color:"#f1f5f9"}}>{inv.date}</div>
+                      <div style={{fontSize:11,color:"#475569",marginTop:2}}>{inv.notes||"No notes"}</div>
+                    </div>
+                    <div style={{textAlign:"right"}}>
+                      {inv.expiry&&<div style={{fontSize:11,color:inv.expiry&&new Date(inv.expiry)<new Date()?"#f87171":"#fb923c"}}>
+                        Exp: {inv.expiry}
+                      </div>}
+                      <div style={{fontSize:10,color:"#334155",marginTop:2}}>By: {inv.recordedBy||"—"}</div>
+                    </div>
+                  </div>
                 </div>
               ))}
             </div>
-            <div style={{fontWeight:700,color:"#f1f5f9",marginBottom:8,fontSize:13}}>Items Purchased</div>
-            <table className="tbl" style={{marginBottom:14}}>
-              <thead><tr><th>Item</th><th>Qty</th><th>Unit</th><th>Unit Cost</th><th>Total</th><th>Expiry</th></tr></thead>
-              <tbody>
-                {viewModal.items.map((item,i)=>(
-                  <tr key={i}>
-                    <td style={{color:"#e2e8f0",fontWeight:600}}>{item.name}</td>
-                    <td style={{color:"#38bdf8"}}>{item.qty}</td>
-                    <td style={{color:"#64748b"}}>{item.unit||"—"}</td>
-                    <td style={{color:"#94a3b8"}}>{item.unitCost>0?fmt(item.unitCost):"—"}</td>
-                    <td style={{color:"#4ade80",fontWeight:700}}>{item.totalCost>0?fmt(item.totalCost):"—"}</td>
-                    <td style={{color:item.expiry&&days(item.expiry)<=60?"#fb923c":"#64748b",fontSize:11}}>{item.expiry||"—"}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            <div style={{textAlign:"right",fontSize:16,fontWeight:800,color:"#4ade80",marginBottom:10}}>
-              Total: {fmt(viewModal.total)}
+          </div>
+        );
+      })()}
+
+      {/* Add/Edit Supplier Modal */}
+      {modal&&(
+        <div className="mo" onClick={e=>e.target===e.currentTarget&&(setModal(false),setSupInput(""),setEditing(null))}>
+          <div className="md" style={{width:520}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
+              <h3 style={{fontFamily:"Syne,sans-serif",fontSize:16,fontWeight:800,color:"#f1f5f9"}}>
+                {editing?"✏️ Edit Supplier":"➕ Add Supplier"}
+              </h3>
+              <button className="btn bg" style={{padding:"4px 7px"}} onClick={()=>{setModal(false);setSupInput("");setEditing(null);}}><Ic d={I.x} size={13}/></button>
             </div>
-            {viewModal.notes&&<div style={{fontSize:12,color:"#475569",background:"#0a1525",borderRadius:8,padding:"8px 12px"}}>Note: {viewModal.notes}</div>}
+
+            {/* Expiry Date — top as requested */}
+            <div className="fg">
+              <label>Expiry Date (of supplies)</label>
+              <input className="inp" type="date" value={form.expiry} onChange={e=>setForm({...form,expiry:e.target.value})}/>
+            </div>
+
+            {/* Supplier name with autocomplete */}
+            <div className="fg" style={{position:"relative"}}>
+              <label>Supplier / Dealer Name *</label>
+              <input className="inp" placeholder="Type to search or add new supplier..."
+                value={supInput}
+                onChange={e=>{setSupInput(e.target.value);setForm({...form,supplier:e.target.value});}}
+                autoComplete="off"/>
+              {suggestions.length>0&&(
+                <div style={{position:"absolute",zIndex:999,left:0,right:0,background:"#07101f",
+                  border:"1px solid #1e3a5f",borderRadius:8,maxHeight:160,overflowY:"auto",top:"100%",marginTop:2}}>
+                  {suggestions.map(s=>(
+                    <div key={s.id} onClick={()=>pickSupplier(s)}
+                      style={{padding:"8px 12px",cursor:"pointer",borderBottom:"1px solid #1e2d45"}}>
+                      <div style={{fontSize:13,color:"#f1f5f9",fontWeight:600}}>{s.supplier}</div>
+                      <div style={{fontSize:11,color:"#475569"}}>{s.phone||""} {s.address?"· "+s.address.slice(0,30):""}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="fr">
+              <div className="fg"><label>Phone Number</label><input className="inp" placeholder="e.g. 08012345678" value={form.phone} onChange={e=>setForm({...form,phone:e.target.value})}/></div>
+              <div className="fg"><label>Email Address</label><input className="inp" placeholder="e.g. supplier@email.com" value={form.email||""} onChange={e=>setForm({...form,email:e.target.value})}/></div>
+            </div>
+            <div className="fg"><label>Address</label><input className="inp" placeholder="e.g. 12 Aba Road, Port Harcourt" value={form.address} onChange={e=>setForm({...form,address:e.target.value})}/></div>
+            <div className="fg"><label>Date</label><input className="inp" type="date" value={form.date} onChange={e=>setForm({...form,date:e.target.value})}/></div>
+            <div className="fg"><label>Notes</label><textarea className="inp" rows={2} placeholder="e.g. Reliable supplier, delivers within 2 days..." value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})}/></div>
+
+            <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
+              <button className="btn bg" onClick={()=>{setModal(false);setSupInput("");setEditing(null);}}>Cancel</button>
+              <button className="btn bs" onClick={handleSave}><Ic d={I.check} size={13}/> {editing?"Update Supplier":"Save Supplier"}</button>
+            </div>
           </div>
         </div>
       )}
@@ -2144,9 +2220,9 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
       {/* Stats */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))",gap:14,marginBottom:16}}>
         {[
-          {l:"Total Invoices",    v:invoices.length,       c:"#38bdf8", i:"📦"},
-          {l:"Total Purchases",   v:fmt(totalPurchases),   c:"#4ade80", i:"💰"},
-          {l:"Unique Suppliers",  v:uniqueSuppliers,       c:"#a78bfa", i:"🏭"},
+          {l:"Total Suppliers",   v:totalSuppliers, c:"#38bdf8", i:"🏭"},
+          {l:"Total Records",     v:totalInvoices,  c:"#4ade80", i:"📦"},
+          {l:"Most Recent",       v:allSuppliers[0]?.supplier?.slice(0,14)||"—", c:"#a78bfa", i:"🕐"},
         ].map((s,i)=>(
           <div key={i} style={{background:"linear-gradient(135deg,#0d1528,#0d1f3c)",border:"1px solid #1e3a5f",borderRadius:14,padding:16}}>
             <div style={{fontSize:22,marginBottom:6}}>{s.i}</div>
@@ -2158,129 +2234,44 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
 
       {/* Search and Add */}
       <div style={{display:"flex",gap:10,marginBottom:14,alignItems:"center"}}>
-        <input className="inp" style={{maxWidth:280}} placeholder="Search by supplier or date..." value={search} onChange={e=>setSearch(e.target.value)}/>
-        <button className="btn bs" style={{marginLeft:"auto"}} onClick={openNew}><Ic d={I.plus} size={13}/> New Invoice</button>
+        <input className="inp" style={{maxWidth:300}} placeholder="Search by name, phone or address..." value={search} onChange={e=>setSearch(e.target.value)}/>
+        <div style={{fontSize:12,color:"#475569"}}>{filtered.length} supplier(s)</div>
+        <button className="btn bs" style={{marginLeft:"auto"}} onClick={openNew}><Ic d={I.plus} size={13}/> Add Supplier</button>
       </div>
 
-      {/* Invoice List */}
+      {/* Supplier List */}
       <div className="card" style={{padding:0}}>
         <table className="tbl">
-          <thead><tr><th>Date</th><th>Supplier</th><th>Address</th><th>Items</th><th>Total</th><th>Recorded By</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Supplier</th><th>Phone</th><th>Address</th><th>Expiry</th><th>Last Entry</th><th>Notes</th><th>Actions</th></tr></thead>
           <tbody>
             {filtered.length===0
-              ? <tr><td colSpan={7} style={{textAlign:"center",padding:32,color:"#334155"}}>No invoices yet — add your first purchase</td></tr>
-              : filtered.map(inv=>(
-                <tr key={inv.id}>
-                  <td style={{color:"#64748b",fontSize:12}}>{inv.date}</td>
-                  <td style={{fontWeight:700,color:"#f1f5f9"}}>{inv.supplier}</td>
-                  <td style={{color:"#475569",fontSize:12}}>{inv.address||"—"}</td>
-                  <td style={{color:"#94a3b8",fontSize:12}}>{inv.items.length} item(s)</td>
-                  <td style={{color:"#4ade80",fontWeight:700}}>{fmt(inv.total)}</td>
-                  <td style={{color:"#a78bfa",fontSize:12}}>{inv.recordedBy||"—"}</td>
-                  <td style={{display:"flex",gap:5}}>
-                    <button className="btn bp" style={{padding:"4px 9px",fontSize:11}} onClick={()=>setView(inv)}>👁 View</button>
-                    <button className="btn bg" style={{padding:"4px 9px",fontSize:11}} onClick={()=>openUpdate(inv)}>+ Update</button>
-                    <button className="btn bd" style={{padding:"4px 9px",fontSize:11}} onClick={()=>setConfirm(inv)}><Ic d={I.trash} size={12}/></button>
-                  </td>
-                </tr>
-              ))
+              ? <tr><td colSpan={7} style={{textAlign:"center",padding:32,color:"#334155"}}>No suppliers yet — add your first supplier</td></tr>
+              : filtered.map(inv=>{
+                  const history = getHistory(inv.supplier);
+                  return(
+                    <tr key={inv.id}>
+                      <td style={{fontWeight:700,color:"#f1f5f9"}}>{inv.supplier}</td>
+                      <td style={{color:"#64748b",fontSize:12}}>{inv.phone||"—"}</td>
+                      <td style={{color:"#475569",fontSize:12}}>{inv.address?.slice(0,25)||"—"}</td>
+                      <td style={{color:inv.expiry&&new Date(inv.expiry)<new Date()?"#f87171":"#fb923c",fontSize:12}}>{inv.expiry||"—"}</td>
+                      <td style={{color:"#475569",fontSize:12}}>{inv.date}</td>
+                      <td style={{color:"#334155",fontSize:11}}>{inv.notes?.slice(0,30)||"—"}</td>
+                      <td style={{display:"flex",gap:5}}>
+                        <button className="btn bp" style={{padding:"4px 9px",fontSize:11}} onClick={()=>setHist(inv.supplier)}>📋 History ({history.length})</button>
+                        <button className="btn bg" style={{padding:"4px 9px",fontSize:11}} onClick={()=>openEdit(inv)}><Ic d={I.edit} size={12}/></button>
+                        <button className="btn bd" style={{padding:"4px 9px",fontSize:11}} onClick={()=>setConfirm(inv)}><Ic d={I.trash} size={12}/></button>
+                      </td>
+                    </tr>
+                  );
+                })
             }
           </tbody>
         </table>
       </div>
-
-      {/* Add Invoice Modal */}
-      {modal&&(
-        <div className="mo" onClick={e=>e.target===e.currentTarget&&setModal(false)}>
-          <div className="md" style={{width:580,maxHeight:"90vh",overflowY:"auto"}}>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
-              <h3 style={{fontFamily:"Syne,sans-serif",fontSize:16,fontWeight:800,color:"#f1f5f9"}}>
-              {editingId?"➕ New Delivery — "+form.supplier:"📦 New Purchase Invoice"}
-            </h3>
-              <button className="btn bg" style={{padding:"4px 7px"}} onClick={()=>{setModal(false);setSupSearch("");setEditingId(null);}}><Ic d={I.x} size={13}/></button>
-            </div>
-            <div className="fr">
-              <div className="fg">
-                <label>Supplier / Dealer Name *</label>
-                <input className="inp" placeholder="Type to search or add new supplier..."
-                  value={supplierSearch}
-                  onChange={e=>{setSupSearch(e.target.value);setForm({...form,supplier:e.target.value});}}/>
-                {supplierSearch.length>0&&knownSuppliers.filter(s=>s.toLowerCase().includes(supplierSearch.toLowerCase())&&s!==supplierSearch).length>0&&(
-                  <div style={{background:"#07101f",border:"1px solid #1e3a5f",borderRadius:8,maxHeight:140,overflowY:"auto",marginTop:4}}>
-                    {knownSuppliers.filter(s=>s.toLowerCase().includes(supplierSearch.toLowerCase())).map(s=>(
-                      <div key={s} onClick={()=>selectSupplier(s)}
-                        style={{padding:"8px 12px",cursor:"pointer",fontSize:13,color:"#f1f5f9",borderBottom:"1px solid #1e2d45"}}
-                        onMouseEnter={e=>e.target.style.background="#0d1f3c"}
-                        onMouseLeave={e=>e.target.style.background="transparent"}>
-                        {s}
-                        <span style={{fontSize:10,color:"#475569",marginLeft:8}}>
-                          {invoices.filter(i=>i.supplier===s).length} previous invoice(s)
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-              <div className="fg"><label>Date *</label><input className="inp" type="date" value={form.date} onChange={e=>setForm({...form,date:e.target.value})}/></div>
-            </div>
-            <div className="fr">
-              <div className="fg"><label>Supplier Address</label><input className="inp" placeholder="e.g. 12 Aba Road, PH" value={form.address} onChange={e=>setForm({...form,address:e.target.value})}/></div>
-              <div className="fg"><label>Supplier Phone</label><input className="inp" placeholder="e.g. 08012345678" value={form.phone} onChange={e=>setForm({...form,phone:e.target.value})}/></div>
-            </div>
-
-            {/* Add item row */}
-            <div style={{background:"#0a1525",border:"1px solid #1e3a5f",borderRadius:10,padding:14,marginBottom:12}}>
-              <div style={{fontSize:11,fontWeight:700,color:"#475569",marginBottom:10,textTransform:"uppercase",letterSpacing:".05em"}}>Add Item</div>
-              <div className="fr">
-                <div className="fg"><label>Item Name</label><input className="inp" placeholder="e.g. Paracetamol 500mg" value={itemRow.name} onChange={e=>setItemRow({...itemRow,name:e.target.value})}/></div>
-                <div className="fg"><label>Unit</label>
-                  <select className="inp" value={itemRow.unit} onChange={e=>setItemRow({...itemRow,unit:e.target.value})}>
-                    <option value="">Select...</option>
-                    <option>Tabs</option><option>Caps</option><option>Bottles</option><option>Vials</option><option>Sachets</option><option>Packets</option><option>Pieces</option><option>Cartons</option>
-                  </select>
-                </div>
-              </div>
-              <div className="fr">
-                <div className="fg"><label>Quantity</label><input className="inp" type="number" min={1} placeholder="0" value={itemRow.qty} onChange={e=>setItemRow({...itemRow,qty:e.target.value})}/></div>
-                <div className="fg"><label>Unit Cost (₦)</label><input className="inp" type="number" min={0} placeholder="0" value={itemRow.unitCost} onChange={e=>setItemRow({...itemRow,unitCost:e.target.value})}/></div>
-              </div>
-              <div className="fg"><label>Expiry Date</label><input className="inp" type="date" value={itemRow.expiry} onChange={e=>setItemRow({...itemRow,expiry:e.target.value})}/></div>
-              {itemRow.qty&&itemRow.unitCost&&<div style={{fontSize:11,color:"#38bdf8",marginBottom:8}}>Line total: {fmt(+itemRow.qty*(+itemRow.unitCost||0))}</div>}
-              <button className="btn bp" onClick={addItem}><Ic d={I.plus} size={13}/> Add Item</button>
-            </div>
-
-            {/* Items added */}
-            {form.items.length>0&&(
-              <div style={{marginBottom:12}}>
-                {form.items.map((item,i)=>(
-                  <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"7px 0",borderBottom:"1px solid #1e2d45"}}>
-                    <div>
-                      <div style={{fontSize:13,color:"#e2e8f0",fontWeight:600}}>{item.name}</div>
-                      <div style={{fontSize:11,color:"#475569"}}>{item.qty} {item.unit} × {fmt(item.unitCost)}</div>
-                    </div>
-                    <div style={{display:"flex",alignItems:"center",gap:10}}>
-                      <span style={{color:"#4ade80",fontWeight:700}}>{fmt(item.totalCost)}</span>
-                      <button className="btn bd" style={{padding:"3px 7px"}} onClick={()=>setForm({...form,items:form.items.filter((_,j)=>j!==i)})}><Ic d={I.trash} size={11}/></button>
-                    </div>
-                  </div>
-                ))}
-                <div style={{textAlign:"right",marginTop:8,fontSize:16,fontWeight:800,color:"#4ade80"}}>
-                  Invoice Total: {fmt(form.items.reduce((a,i)=>a+i.totalCost,0))}
-                </div>
-              </div>
-            )}
-
-            <div className="fg"><label>Notes</label><textarea className="inp" rows={2} placeholder="Optional notes..." value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})}/></div>
-            <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
-              <button className="btn bg" onClick={()=>{setModal(false);setSupSearch("");setEditingId(null);}}> Cancel</button>
-              <button className="btn bs" onClick={handleSave}><Ic d={I.check} size={13}/> Save Invoice</button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
+
 
 // ═══════════════════════════════════════════════════════════════════
 //  REPORTS — with daily, custom date range
