@@ -2004,8 +2004,11 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
   const [editing,setEditing]     = useState(null); // invoice id being edited
   const [search,setSearch]       = useState("");
   const [supInput,setSupInput]   = useState("");
-  const E = {supplier:"",address:"",phone:"",email:"",notes:"",expiry:"",date:now()};
+  const E = {supplier:"",address:"",phone:"",email:"",notes:"",expiry:"",date:now(),items:[]};
   const [form,setForm]           = useState(E);
+  const [itemRow,setItemRow]     = useState({name:"",qty:"",unit:"Tabs",unitCost:"",expiry:""});
+  const [drugSearch,setDrugSearch] = useState("");
+  const IR = {name:"",qty:"",unit:"Tabs",unitCost:"",expiry:""};
 
   // All unique suppliers — most recent first
   const allSuppliers = [...new Map(
@@ -2041,7 +2044,7 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
   };
 
   const openNew = () => {
-    setEditing(null); setForm(E); setSupInput(""); setModal(true);
+    setEditing(null); setForm(E); setSupInput(""); setItemRow(IR); setDrugSearch(""); setModal(true);
   };
 
   const openEdit = (inv) => {
@@ -2055,6 +2058,14 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
     setModal(true);
   };
 
+  const addItem = () => {
+    if(!itemRow.name||!itemRow.qty) return showToast("Item name and quantity required","error");
+    const totalCost = +itemRow.qty * (+itemRow.unitCost||0);
+    setForm({...form, items:[...form.items, {...itemRow, qty:+itemRow.qty, unitCost:+itemRow.unitCost||0, totalCost}]});
+    setItemRow(IR);
+    setDrugSearch("");
+  };
+
   const handleSave = async() => {
     if(!form.supplier) return showToast("Supplier name is required","error");
     let newInvoices;
@@ -2065,7 +2076,8 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
       action = "INVOICE_UPDATED"; detail = `Updated: ${form.supplier}`;
     } else {
       // Add new supplier/invoice
-      const invoice = {id:uid(),...form,recordedBy:session.name,timestamp:Date.now(),items:[]};
+      const invoiceTotal = form.items.reduce((a,i)=>a+(i.totalCost||0),0);
+      const invoice = {id:uid(),...form,total:invoiceTotal,recordedBy:session.name,timestamp:Date.now()};
       newInvoices = [...invoices, invoice];
       action = "INVOICE_ADDED"; detail = `Added supplier: ${form.supplier}`;
     }
@@ -2144,18 +2156,29 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
               <div style={{fontWeight:700,color:"#f1f5f9",marginBottom:8,fontSize:13}}>All Entries</div>
               {history.map((inv,i)=>(
                 <div key={inv.id} style={{background:"#0a1525",border:"1px solid #1e3a5f",borderRadius:10,padding:12,marginBottom:8}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:6}}>
                     <div>
                       <div style={{fontSize:12,fontWeight:700,color:"#f1f5f9"}}>{inv.date}</div>
                       <div style={{fontSize:11,color:"#475569",marginTop:2}}>{inv.notes||"No notes"}</div>
                     </div>
                     <div style={{textAlign:"right"}}>
-                      {inv.expiry&&<div style={{fontSize:11,color:inv.expiry&&new Date(inv.expiry)<new Date()?"#f87171":"#fb923c"}}>
+                      {inv.expiry&&<div style={{fontSize:11,color:new Date(inv.expiry)<new Date()?"#f87171":"#fb923c"}}>
                         Exp: {inv.expiry}
                       </div>}
+                      {inv.total>0&&<div style={{fontSize:12,fontWeight:700,color:"#4ade80"}}>{fmt(inv.total)}</div>}
                       <div style={{fontSize:10,color:"#334155",marginTop:2}}>By: {inv.recordedBy||"—"}</div>
                     </div>
                   </div>
+                  {inv.items&&inv.items.length>0&&(
+                    <div style={{borderTop:"1px solid #1e2d45",paddingTop:6}}>
+                      {inv.items.map((it,j)=>(
+                        <div key={j} style={{display:"flex",justifyContent:"space-between",fontSize:11,color:"#94a3b8",marginBottom:3}}>
+                          <span>{it.name} × {it.qty} {it.unit}</span>
+                          <span style={{color:"#4ade80"}}>{it.totalCost>0?fmt(it.totalCost):"—"}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -2208,6 +2231,102 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
             <div className="fg"><label>Address</label><input className="inp" placeholder="e.g. 12 Aba Road, Port Harcourt" value={form.address} onChange={e=>setForm({...form,address:e.target.value})}/></div>
             <div className="fg"><label>Date</label><input className="inp" type="date" value={form.date} onChange={e=>setForm({...form,date:e.target.value})}/></div>
             <div className="fg"><label>Notes</label><textarea className="inp" rows={2} placeholder="e.g. Reliable supplier, delivers within 2 days..." value={form.notes} onChange={e=>setForm({...form,notes:e.target.value})}/></div>
+
+            {/* Add Item Section — linked to inventory */}
+            <div style={{background:"#0a1525",border:"1px solid #1e3a5f",borderRadius:10,padding:14,marginBottom:12}}>
+              <div style={{fontSize:11,fontWeight:700,color:"#475569",marginBottom:10,textTransform:"uppercase",letterSpacing:".05em"}}>Add Items Received</div>
+              {/* Drug search linked to inventory */}
+              <div style={{marginBottom:8}}>
+                <input className="inp" placeholder="🔍 Search drug/item from inventory..."
+                  value={drugSearch}
+                  onChange={e=>{
+                    setDrugSearch(e.target.value);
+                    setItemRow({...itemRow,name:e.target.value});
+                  }}
+                  autoComplete="off"/>
+                {drugSearch.length>0&&(
+                  <div style={{maxHeight:140,overflowY:"auto",background:"#07101f",border:"1px solid #1e3a5f",borderRadius:8,marginTop:4}}>
+                    {data.inventory
+                      .filter(d=>d.name.toLowerCase().includes(drugSearch.toLowerCase()))
+                      .slice(0,10)
+                      .map(d=>(
+                        <div key={d.id}
+                          onClick={()=>{
+                            setItemRow({...itemRow,name:d.name,unit:d.unit||"Tabs",unitCost:String(d.costPrice||"")});
+                            setDrugSearch(d.name);
+                          }}
+                          style={{padding:"7px 12px",cursor:"pointer",borderBottom:"1px solid #1e2d45",
+                            display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                          <div>
+                            <div style={{fontSize:12,color:"#f1f5f9",fontWeight:600}}>{d.name}</div>
+                            <div style={{fontSize:10,color:"#475569"}}>{d.unit} · Cost: {fmt(d.costPrice||0)}</div>
+                          </div>
+                          <div style={{fontSize:11,color:"#38bdf8"}}>{d.qty} in stock</div>
+                        </div>
+                      ))
+                    }
+                    {drugSearch.length>0&&data.inventory.filter(d=>d.name.toLowerCase().includes(drugSearch.toLowerCase())).length===0&&(
+                      <div style={{padding:10,color:"#475569",fontSize:12,textAlign:"center"}}>
+                        No match — you can still type a custom item name
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+              <div className="fr">
+                <div className="fg"><label>Quantity</label>
+                  <input className="inp" type="number" min={1} placeholder="0"
+                    value={itemRow.qty} onChange={e=>setItemRow({...itemRow,qty:e.target.value})}/>
+                </div>
+                <div className="fg"><label>Unit</label>
+                  <select className="inp" value={itemRow.unit} onChange={e=>setItemRow({...itemRow,unit:e.target.value})}>
+                    <option>Tabs</option><option>Caps</option><option>Bottles</option><option>Vials</option>
+                    <option>Sachets</option><option>Packets</option><option>Pieces</option><option>Cartons</option>
+                  </select>
+                </div>
+              </div>
+              <div className="fr">
+                <div className="fg"><label>Unit Cost (₦)</label>
+                  <input className="inp" type="number" min={0} placeholder="0"
+                    value={itemRow.unitCost} onChange={e=>setItemRow({...itemRow,unitCost:e.target.value})}/>
+                </div>
+                <div className="fg"><label>Item Expiry Date</label>
+                  <input className="inp" type="date" value={itemRow.expiry} onChange={e=>setItemRow({...itemRow,expiry:e.target.value})}/>
+                </div>
+              </div>
+              {itemRow.qty&&itemRow.unitCost&&(
+                <div style={{fontSize:11,color:"#38bdf8",marginBottom:8}}>
+                  Line total: {fmt(+itemRow.qty*(+itemRow.unitCost||0))}
+                </div>
+              )}
+              <button className="btn bp" onClick={addItem}><Ic d={I.plus} size={13}/> Add Item</button>
+            </div>
+
+            {/* Items added list */}
+            {form.items.length>0&&(
+              <div style={{marginBottom:12}}>
+                <div style={{fontSize:11,fontWeight:700,color:"#475569",marginBottom:6}}>ITEMS ADDED</div>
+                {form.items.map((item,i)=>(
+                  <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",
+                    padding:"7px 0",borderBottom:"1px solid #1e2d45"}}>
+                    <div>
+                      <div style={{fontSize:13,color:"#e2e8f0",fontWeight:600}}>{item.name}</div>
+                      <div style={{fontSize:11,color:"#475569"}}>{item.qty} {item.unit} × {fmt(item.unitCost)} {item.expiry?"· Exp: "+item.expiry:""}</div>
+                    </div>
+                    <div style={{display:"flex",alignItems:"center",gap:10}}>
+                      <span style={{color:"#4ade80",fontWeight:700}}>{fmt(item.totalCost)}</span>
+                      <button className="btn bd" style={{padding:"3px 7px"}}
+                        onClick={()=>setForm({...form,items:form.items.filter((_,j)=>j!==i)})}>
+                        <Ic d={I.trash} size={11}/>
+                      </button>
+                    </div>
+                  </div>
+                ))}
+                <div style={{textAlign:"right",marginTop:8,fontSize:15,fontWeight:800,color:"#4ade80"}}>
+                  Invoice Total: {fmt(form.items.reduce((a,i)=>a+i.totalCost,0))}
+                </div>
+              </div>
+            )}
 
             <div style={{display:"flex",gap:10,justifyContent:"flex-end"}}>
               <button className="btn bg" onClick={()=>{setModal(false);setSupInput("");setEditing(null);}}>Cancel</button>
