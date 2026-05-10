@@ -2070,22 +2070,78 @@ function PurchaseInvoice({data, session, save, addLog, showToast}){
     if(!form.supplier) return showToast("Supplier name is required","error");
     let newInvoices;
     let action, detail;
+    let updatedInventory = [...data.inventory];
+    let inventoryChanged = false;
+
     if(editing) {
-      // Update existing invoice
+      // Update existing supplier details only — no stock change on edit
       newInvoices = invoices.map(i=>i.id===editing?{...i,...form,id:editing}:i);
       action = "INVOICE_UPDATED"; detail = `Updated: ${form.supplier}`;
     } else {
-      // Add new supplier/invoice
+      // New invoice — update inventory quantities for matched drugs
       const invoiceTotal = form.items.reduce((a,i)=>a+(i.totalCost||0),0);
       const invoice = {id:uid(),...form,total:invoiceTotal,recordedBy:session.name,timestamp:Date.now()};
       newInvoices = [...invoices, invoice];
-      action = "INVOICE_ADDED"; detail = `Added supplier: ${form.supplier}`;
+      action = "INVOICE_ADDED";
+
+      // Auto-update inventory for each item in the invoice
+      const stockUpdates = [];
+      form.items.forEach(item => {
+        // Match by name (case-insensitive)
+        const drugIdx = updatedInventory.findIndex(d=>
+          d.name.toLowerCase().trim() === item.name.toLowerCase().trim()
+        );
+        if(drugIdx > -1) {
+          // Drug found — increase quantity
+          updatedInventory[drugIdx] = {
+            ...updatedInventory[drugIdx],
+            qty: updatedInventory[drugIdx].qty + item.qty,
+            // Update expiry if provided and newer
+            expiry: item.expiry || updatedInventory[drugIdx].expiry,
+            supplier: form.supplier || updatedInventory[drugIdx].supplier,
+          };
+          stockUpdates.push(`${item.name} +${item.qty}`);
+          inventoryChanged = true;
+        }
+        // If drug not found in inventory — skip stock update
+        // (Dora can add it manually to inventory)
+      });
+
+      const matched = stockUpdates.length;
+      const total = form.items.length;
+      detail = `Received from ${form.supplier} — ${matched}/${total} items matched & updated in inventory`;
     }
-    const [d2,entry] = addLog({...data,invoices:newInvoices}, action, detail, session);
-    const ok = await save(d2,{invoice:editing?invoices.find(i=>i.id===editing):newInvoices[newInvoices.length-1],auditEntry:entry});
+
+    const newData = {...data, invoices:newInvoices, inventory:updatedInventory};
+    const [d2,entry] = addLog(newData, action, detail, session);
+
+    // Save invoice + inventory if changed
+    const changedDrugs = inventoryChanged
+      ? updatedInventory.filter(d=>form.items.find(i=>i.name.toLowerCase().trim()===d.name.toLowerCase().trim()))
+      : [];
+
+    const saveOps = {
+      invoice: editing ? invoices.find(i=>i.id===editing) : d2.invoices[d2.invoices.length-1],
+      auditEntry: entry,
+      ...(inventoryChanged && {inventory: true}),
+    };
+
+    const ok = await save(d2, saveOps);
     if(ok!==false){
-      showToast(editing?"Supplier updated":"Supplier added successfully");
-      setModal(false); setForm(E); setSupInput(""); setEditing(null);
+      const matched = form.items.filter(item=>
+        data.inventory.find(d=>d.name.toLowerCase().trim()===item.name.toLowerCase().trim())
+      ).length;
+      const unmatched = form.items.length - matched;
+      if(editing){
+        showToast("Supplier updated");
+      } else if(matched > 0 && unmatched === 0){
+        showToast(`✅ Invoice saved! ${matched} drug(s) restocked automatically`);
+      } else if(matched > 0 && unmatched > 0){
+        showToast(`✅ Saved! ${matched} drug(s) restocked. ${unmatched} item(s) not in inventory — add manually`,"info");
+      } else {
+        showToast("Invoice saved. No items matched inventory — check drug names match exactly");
+      }
+      setModal(false); setForm(E); setSupInput(""); setEditing(null); setItemRow(IR); setDrugSearch("");
     }
   };
 
